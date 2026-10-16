@@ -172,6 +172,10 @@ def last_entry(domain: Path, exclude: list[Path] | None = None):
     for log in sorted(domain.rglob("intentions-log.md")):
         if any(str(log.resolve()).startswith(str(e) + "/") for e in skip):
             continue
+        # 閉じた年（例: archive/2026/）は、このドメインの最新の作業ではない。
+        # 読むと、同じ日付のとき新しいログより古いログが勝ってしまう。
+        if "archive" in log.relative_to(domain).parts:
+            continue
         try:
             lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError:
