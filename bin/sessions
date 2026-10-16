@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""セッションの履歴。何を、いつやって、どうすれば開き直せるか。
+
+モデルのトークンを使わない決定的な処理。Claude Code 自身の記録
+（~/.claude/projects/<slug>/*.jsonl）を読み、安く取れるものだけを取り出す:
+日付、ターン数、そして**ユーザーが最初に言った実のある一言**。この
+「最初の依頼」が、ほとんどの場合そのセッションの良い見出しになる。
+
+結果のほうは反対側から来る。`closeout` が1セッションにつき1行を
+セッション台帳（`knowledge/domains/<system>/sessions.md`、無ければ
+`tasks/sessions.md`）に追記する。記録は「何を**訊かれた**か」を知っていて、
+締めだけが「何が**出た**か」を知っている。ここはその2つを突き合わせる場所。
+
+記録は端末ローカル（~/.claude はリポジトリの中に無い）なので、ここに
+出るセッションidで開き直せるのは**それを作った端末だけ**。要約の行自体は
+どこででも価値を持つ。
+
+使い方:
+  bin/sessions           直近12件（見出しが取れたもの）
+  bin/sessions --top N   直近N件
+  bin/sessions --all     見出しの取れない探り用セッションも含める
+  bin/sessions <番号>    その行の詳細。開き直すコマンドつき
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+
+NAME = "{{AI_NAME}}"   # setup スキルが置き換える
+ICON = "🧠"
+
+ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parent.parent)
+
+RESET = "\033[0m"
+GOLD = "\033[38;2;230;185;70m"
+DIM = "\033[38;2;140;140;140m"
+BOLD = "\033[1m"
+
+# ハーネスの配管であって、ユーザーが実際に頼んだことではない書き出し。
+BOILER = (
+    "セッション開始。",
+    "session start. greet me",
+    "<local-command-caveat>",
+    "<command-name>",
+    "caveat: the messages below",
+    "[request interrupted",
+    "reply with only",
+)
+
+# これより短いものはメニューの選択か相槌であって、仕事の説明ではない。
+MIN_TITLE = 8
+
+
+def color(on: bool):
+    return (lambda s, c: f"{c}{s}{RESET}") if on else (lambda s, c: s)
+
+
+def main_checkout() -> Path:
+    """記録は**メインのチェックアウトのパス**で紐づく。worktree のではない。
+
+    `git worktree add ../<topic>` の中では ROOT が worktree を指すので、
+    素直にスラグを作ると存在しないディレクトリを見にいく。
+    --git-common-dir が本体の .git を返し、その親が本当のリポジトリ根。
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if out:
+            return Path(out).parent
+    except Exception:
+        pass
+    return ROOT
+
+
+def transcript_dir() -> Path:
+    slug = str(main_checkout()).replace("/", "-")
+    return Path.home() / ".claude" / "projects" / slug
+
+
+def digest_path() -> Path | None:
+    """セッション台帳の場所。ドメインに置いてあればそれを、無ければ tasks/。"""
+    for p in sorted((ROOT / "knowledge" / "domains").glob("*/sessions.md")):
+        return p
+    p = ROOT / "tasks" / "sessions.md"
+    return p if p.is_file() else None
+
+
+def dwidth(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def trunc(s: str, width: int) -> str:
+    if dwidth(s) <= width:
+        return s
+    out, used = "", 0
+    for ch in s:
+        w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used + w > width - 1:
+            break
+        out, used = out + ch, used + w
+    return out + "…"
+
+
+def pad(s: str, width: int) -> str:
+    return s + " " * max(0, width - dwidth(s))
+
+
+def text_of(entry: dict) -> str:
+    msg = entry.get("message") or {}
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "text":
+                return b.get("text", "")
+    return ""
+
+
+def read_session(path: Path) -> dict:
+    """記録1本につき1回だけ走査する。要約行に要るものしか読まない。"""
+    turns, first_ask, started, branch = 0, None, None, None
+    with path.open(errors="ignore") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if d.get("type") != "user" or d.get("isSidechain"):
+                continue
+            txt = text_of(d).strip()
+            if not txt:
+                continue
+            turns += 1
+            started = started or d.get("timestamp")
+            branch = branch or d.get("gitBranch")
+            # メニューの選択（"m" "b" "2"）や相槌（"ok" "お願い"）は
+            # 本物のターンだが見出しには使えないので、読み進める。
+            flat = " ".join(txt.split())
+            if (first_ask is None
+                    and not txt.lower().lstrip().startswith(BOILER)
+                    and dwidth(flat) >= MIN_TITLE):
+                first_ask = flat
+    return {
+        "id": path.stem,
+        "short": path.stem[:8],
+        "turns": turns,
+        "ask": first_ask,
+        "started": started,
+        "branch": branch,
+        "kb": path.stat().st_size // 1024,
+        "mtime": dt.datetime.fromtimestamp(path.stat().st_mtime),
+    }
+
+
+def digests() -> dict:
+    """closeout が書いた結果の行。短いセッションidで引く。"""
+    out = {}
+    path = digest_path()
+    if not path or not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 6 or cells[1].startswith(("Date", "日付", "---")):
+            continue
+        out[cells[2].strip("`")] = {"outcome": cells[3], "domains": cells[4]}
+    return out
+
+
+
+
+def collect(show_all: bool) -> list:
+    tdir = transcript_dir()
+    if not tdir.is_dir():
+        return []
+    rows = [read_session(p) for p in tdir.glob("*.jsonl")]
+    rows = [r for r in rows if show_all or r["ask"]]
+    rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows
+
+
+def main() -> None:
+    args = [a for a in sys.argv[1:] if a != "--no-color"]
+    c = color(sys.stdout.isatty() and "--no-color" not in sys.argv[1:])
+    show_all = "--all" in args
+    top = 12
+    if "--top" in args:
+        try:
+            top = int(args[args.index("--top") + 1])
+        except (IndexError, ValueError):
+            pass
+
+    rows = collect(show_all)
+    if not rows:
+        print("\n  このリポジトリの記録が見つかりません（記録は端末ローカルです）。\n")
+        return
+
+    dg = digests()
+    picked = [a for a in args if a.isdigit() and "--top" not in args[: args.index(a)]]
+
+    if picked:
+        n = int(picked[0])
+        if not 1 <= n <= len(rows):
+            print(f"\n  {n} 番のセッションはありません。全部で {len(rows)} 件です。\n")
+            return
+        r = rows[n - 1]
+        d = dg.get(r["short"], {})
+        print()
+        print(c(f"  セッション {n}  ·  {r['mtime']:%Y-%m-%d %H:%M}  ·  {r['turns']} ターン  ·  {r['kb']}KB", GOLD + BOLD))
+        if r["branch"]:
+            print(c(f"  ブランチ: {r['branch']}", DIM))
+        print()
+        if d.get("outcome"):
+            print(f"  結果:    {d['outcome']}")
+            if d.get("domains"):
+                print(c(f"  ドメイン: {d['domains']}", DIM))
+            print()
+        print(c("  最初の依頼:", DIM))
+        print(f"  {trunc(r['ask'] or '(見出しが取れませんでした)', 96)}")
+        print()
+        print(c("  開き直す（端末ローカル。この端末でのみ有効）:", DIM))
+        print(f"  claude --resume {r['id']}")
+        print()
+        return
+
+    print()
+    print(c(f"{ICON} {NAME} のセッション", GOLD + BOLD) + c(
+        f"  ·  {len(rows)} 件  ·  h <番号> で詳細と開き直すコマンド", DIM))
+    print()
+    for i, r in enumerate(rows[:top], 1):
+        d = dg.get(r["short"], {})
+        title = d.get("outcome") or r["ask"] or "(見出しが取れませんでした)"
+        print(f" {c(str(i).rjust(2), GOLD + BOLD)} {r['mtime']:%m-%d}  "
+              f"{pad(str(r['turns']) + 't', 5)}{trunc(title, 62)}")
+        if d.get("outcome") and r["ask"]:
+            print(c(f"         {trunc(r['ask'], 62)}", DIM))
+    print()
+    rest = len(rows) - min(top, len(rows))
+    foot = "  途中保存した仕事は `resume`"
+    if rest:
+        foot += f"     ほか {rest} 件     --all で探り用も表示"
+    print(c(foot, DIM))
+    print()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""新しいドメインを作り、知らなければならない場所すべてに登録する。
+
+    bin/new-domain <slug> <表示名> <一行の目的> [--lane <レーン名>] [--dry-run]
+    例: bin/new-domain home-renovation 家の改修 "築40年の家を直す計画と記録" --lane 暮らし
+
+やること（add-domain スキルの手順2と3の機械的な部分）:
+  1. knowledge/domains/_template/ を複製し、名前・場所・目的を埋める
+  2. knowledge/index.md の「現在のドメイン」に1行、「ドメイン目録」に1ブロック
+  3. state.md の「稼働中のドメイン」に1行
+  4. bin/statusline.py の DOMAIN_LABELS に表示名
+  5. --lane があれば bin/menu の LANES に（無ければメニューでは「その他」に出る）
+
+知識ポリシー（README の中身）は埋めない。それは会話から考えることで、スクリプトの仕事ではない。
+初回テスト（2026-10-16）で、AIがこの5箇所を毎回手で書き換えていたので1本にした。
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DOMAINS = ROOT / "knowledge" / "domains"
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def edit(path: Path, fn, dry: bool) -> None:
+    before = path.read_text(encoding="utf-8")
+    after = fn(before)
+    if after == before:
+        die(f"{path.relative_to(ROOT)} を書き換えられませんでした（形が想定と違います）。手で足してください。", 1)
+    if not dry:
+        path.write_text(after, encoding="utf-8")
+    print(f"  登録: {path.relative_to(ROOT)}")
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    lane = None
+    if "--lane" in args:
+        i = args.index("--lane")
+        try:
+            lane = args[i + 1]
+        except IndexError:
+            die("--lane のあとにレーン名を書いてください")
+        del args[i:i + 2]
+    if len(args) != 3:
+        die(__doc__.split("\n\n")[1])
+    slug, label, purpose = args
+    if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", slug):
+        die(f"slug は英小文字・数字・ハイフンだけ（例 home-renovation）: {slug}")
+    dest = DOMAINS / slug
+    if dest.exists():
+        die(f"もうあります: knowledge/domains/{slug}/")
+
+    # 1. 雛形を複製して埋める
+    if not dry:
+        shutil.copytree(DOMAINS / "_template", dest)
+        for f in dest.glob("*.md"):
+            t = f.read_text(encoding="utf-8")
+            t = t.replace("<ドメイン名>", label).replace("<slug>", slug).replace("<一行で>", purpose)
+            f.write_text(t, encoding="utf-8")
+    print(f"  作成: knowledge/domains/{slug}/")
+
+    # 2. knowledge/index.md、2箇所
+    def master(t: str) -> str:
+        row = f"| {label} | `knowledge/domains/{slug}/` | 稼働中 | {purpose} |"
+        if "| （まだありません） | | | |" in t:
+            t = t.replace("| （まだありません） | | | |", row, 1)
+        else:
+            t = re.sub(r"(## 現在のドメイン\n\n\|.*\|\n\|[-| ]+\|\n(?:\|.*\|\n)*)", lambda m: m.group(1) + row + "\n", t, count=1)
+        block = (f"### {label}\n\n- **場所**: `knowledge/domains/{slug}/`\n"
+                 f"- **索引**: `knowledge/domains/{slug}/index.md`\n- **状態**: 稼働中\n"
+                 f"- **目的**: {purpose}\n- **主要な事実**: まだ根拠がありません。\n\n")
+        return t.replace("## 揮発するもの", block + "## 揮発するもの", 1)
+    edit(ROOT / "knowledge" / "index.md", master, dry)
+
+    # 3. state.md
+    def state(t: str) -> str:
+        row = f"| {label}（`{slug}`） | 稼働中 | {purpose} |"
+        ph = re.search(r"\| （まだありません。[^|]*\| \| \|", t)
+        if ph:
+            return t.replace(ph.group(0), row, 1)
+        return re.sub(r"(## 稼働中のドメイン\n\n\|.*\|\n\|[-| ]+\|\n(?:\|.*\|\n)*)", lambda m: m.group(1) + row + "\n", t, count=1)
+    edit(ROOT / "state.md", state, dry)
+
+    # 4. 表示名
+    edit(ROOT / "bin" / "statusline.py",
+         lambda t: t.replace("DOMAIN_LABELS: dict[str, str] = {\n",
+                             f'DOMAIN_LABELS: dict[str, str] = {{\n    "{slug}": "{label}",\n', 1), dry)
+
+    # 5. レーン
+    if lane:
+        def lanes(t: str) -> str:
+            # コメントの例ではなく、LANES の本体だけを見る
+            head = "LANES: list[tuple[str, list[str]]] = [\n"
+            a = t.index(head) + len(head)
+            b = t.index("\n]", a)
+            body = t[a:b]
+            m = re.search(r'^\s*\(\s*"' + re.escape(lane) + r'",\s*\[([^\]]*)\]\)', body, re.M)
+            if m:
+                inner = m.group(1).strip()
+                body = body[:m.start(1)] + (inner + ", " if inner else "") + f'"{slug}"' + body[m.end(1):]
+            else:
+                body = body + f'\n    ("{lane}", ["{slug}"]),'
+            return t[:a] + body + t[b:]
+        edit(ROOT / "bin" / "menu", lanes, dry)
+
+    print(f"\nできました: {label}（{slug}）。README の知識ポリシーは、会話から埋めてください。"
+          + ("（--dry-run のため、何も書き換えていません）" if dry else ""))
+
+
+if __name__ == "__main__":
+    main()

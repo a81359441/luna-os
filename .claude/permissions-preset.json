@@ -1,0 +1,30 @@
+{
+  "_説明": "setup で本人が「おまかせ」に同意したとき、bin/permissions --apply が .claude/settings.local.json に足す。このフォルダの中だけに効く。deny は allow より強い。",
+  "allow": [
+    "Edit",
+    "Write",
+    "WebSearch",
+    "WebFetch",
+    "Bash(git *)",
+    "Bash(gh *)",
+    "Bash(bin/*)",
+    "Bash(python3 bin/*)",
+    "Bash(ls *)",
+    "Bash(cat *)",
+    "Bash(head *)",
+    "Bash(grep *)",
+    "Bash(find *)",
+    "Bash(mkdir *)",
+    "Bash(cp *)",
+    "Bash(mv *)",
+    "Bash(date *)"
+  ],
+  "deny": [
+    "Bash(git push --force*)",
+    "Bash(git push -f*)",
+    "Bash(git reset --hard*)",
+    "Bash(git clean *)",
+    "Bash(rm -rf *)",
+    "Bash(sudo *)"
+  ]
+}

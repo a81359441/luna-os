@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="あなた専用のAIを、自分の Mac で育てる。6ステップのセットアップガイド。">
+<meta property="og:title" content="AIハーネス LUNA">
+<meta property="og:description" content="あなた専用のAIを、自分の Mac で育てる。6ステップのセットアップガイド。">
+<meta property="og:image" content="https://luna-os.surge.sh/hero.jpg">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23E2B04A' d='M12 2A10 10 0 1 0 22 12 8 8 0 0 1 12 2Z'/%3E%3C/svg%3E">
+<script>try{var t=localStorage.getItem('luna-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>AIハーネス LUNA</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@600;800&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Moonlit washi: a calm reading column. Seven steps wax a moon from new to full; the closing card shows the reader's own moon. */
+:root{
+  --paper:#F6F4EE; --surface:#FFFEFB; --mist:#ECE9E0; --line:#DDD8CB; --rail:#CFC8B7;
+  --ink:#1B2A4A; --ink-2:#4C5672; --ink-3:#857F70;
+  --moon:#E2B04A; --moon-ink:#9A6B12; --moon-soft:#F7EBCD; --moon-off:#E4DFD2;
+  --ok:#2C7A5F; --ok-soft:#E1F0E8; --warn:#A5522A; --warn-soft:#F8E8DC;
+  --night:#111B33; --night-2:#1B2747; --night-fg:#E9ECF4; --night-dim:#9AA5BF;
+  --term:#14203A; --term-bar:#202C49; --term-fg:#D6DEEE; --term-dim:#7E8BA6; --term-green:#7FD1A8; --term-gold:#F0C969;
+  --serif:"Shippori Mincho B1","Hiragino Mincho ProN","Yu Mincho",serif;
+  --body:"IBM Plex Sans JP","Hiragino Sans","Hiragino Kaku Gothic ProN",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --img-filter:none; --img-blend:multiply;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#0D1324; --surface:#141C31; --mist:#1A2340; --line:#26304D; --rail:#334063;
+  --ink:#E8EBF3; --ink-2:#AEB6CB; --ink-3:#7D88A3;
+  --moon:#EBC264; --moon-ink:#EBC264; --moon-soft:#2A2618; --moon-off:#27304A;
+  --ok:#7FD1A8; --ok-soft:#14302A; --warn:#F0A47C; --warn-soft:#38241A;
+  --night:#080D1A; --night-2:#121A30;
+  --term:#090F1E; --term-bar:#131B31;
+  --img-filter:invert(1) hue-rotate(180deg) brightness(.92); --img-blend:screen; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#0D1324; --surface:#141C31; --mist:#1A2340; --line:#26304D; --rail:#334063;
+  --ink:#E8EBF3; --ink-2:#AEB6CB; --ink-3:#7D88A3;
+  --moon:#EBC264; --moon-ink:#EBC264; --moon-soft:#2A2618; --moon-off:#27304A;
+  --ok:#7FD1A8; --ok-soft:#14302A; --warn:#F0A47C; --warn-soft:#38241A;
+  --night:#080D1A; --night-2:#121A30;
+  --term:#090F1E; --term-bar:#131B31;
+  --img-filter:invert(1) hue-rotate(180deg) brightness(.92); --img-blend:screen; color-scheme:dark}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{background:var(--paper);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.9;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 72px;
+  -webkit-font-smoothing:antialiased;font-feature-settings:"palt" 1}
+.wrap{max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:88px}
+h1,h2,h3{font-family:var(--serif);font-weight:800;line-height:1.4;text-wrap:balance;margin:0;letter-spacing:.02em}
+p{margin:0}
+b{font-weight:700}
+a{color:inherit;text-decoration-color:var(--moon);text-underline-offset:4px;text-decoration-thickness:2px}
+kbd,code{font-family:var(--mono);font-size:.84em}
+kbd{display:inline-block;padding:0 8px;border:1px solid var(--line);border-bottom-width:3px;border-radius:7px;background:var(--surface);color:var(--ink);white-space:nowrap;line-height:1.7}
+code{background:var(--mist);padding:1px 6px;border-radius:5px;word-break:break-all}
+section{display:flex;flex-direction:column;gap:20px}
+.kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--moon-ink);display:flex;align-items:center;gap:10px}
+.kicker::before{content:"";width:22px;height:1px;background:currentColor}
+section > h2{font-size:clamp(26px,6vw,34px)}
+.lead{font-size:17px;color:var(--ink-2)}
+.note{font-size:14px;color:var(--ink-2)}
+
+/* moon icon */
+.mn{display:block}
+.mn .base{fill:var(--moon-off)}
+.mn .lit{fill:var(--moon)}
+
+/* sticky progress */
+.progress{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;margin-inline:calc(-1 * max(16px,env(safe-area-inset-left,0px)));
+  padding:10px max(16px,env(safe-area-inset-left,0px));background:color-mix(in srgb,var(--paper) 86%,transparent);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.progress-in{max-width:700px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.phases{display:flex;gap:6px;list-style:none;margin:0;padding:0}
+.phases a{display:block;padding:3px;border-radius:50%}
+.phases a:focus-visible{outline:2px solid var(--moon);outline-offset:1px}
+.phases .mn .lit{fill:var(--rail)}
+.phases li.on .mn .lit{fill:var(--moon)}
+.pright{display:flex;align-items:center;gap:10px}
+.theme{border:1px solid var(--line);background:var(--surface);color:var(--ink);font-family:var(--body);font-size:12.5px;font-weight:500;padding:4px 12px;border-radius:999px;cursor:pointer;white-space:nowrap;line-height:1.6}
+.theme:hover{border-color:var(--moon)}
+.theme:focus-visible{outline:2px solid var(--moon);outline-offset:2px}
+.theme .t-d{display:none}
+:root[data-theme="dark"] .theme .t-l{display:none} :root[data-theme="dark"] .theme .t-d{display:inline}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .theme .t-l{display:none} :root:not([data-theme="light"]) .theme .t-d{display:inline}}
+#ptext{font-size:12.5px;color:var(--ink-2);white-space:nowrap;font-family:var(--mono)}
+
+/* hero */
+.hero{padding-top:44px;display:flex;flex-direction:column;gap:24px}
+.hero h1{display:flex;flex-direction:column;gap:2px}
+.hero h1 small{font-size:clamp(17px,4vw,21px);font-weight:600;color:var(--ink-2);letter-spacing:.2em}
+.hero h1 span{font-size:clamp(64px,19vw,124px);line-height:1;letter-spacing:.06em}
+.hero h1 span em{font-style:normal;color:var(--moon)}
+.hero figure{margin:0 -8px}
+.hero img{width:100%;max-width:100%;height:auto;display:block;filter:var(--img-filter);mix-blend-mode:var(--img-blend);
+  -webkit-mask-image:radial-gradient(ellipse 72% 70% at 50% 52%,#000 62%,transparent 100%);mask-image:radial-gradient(ellipse 72% 70% at 50% 52%,#000 62%,transparent 100%)}
+.facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0;border-top:1px solid var(--ink);border-bottom:1px solid var(--line)}
+.facts div{padding:12px 4px;display:flex;flex-direction:column;gap:0}
+.facts div + div{border-left:1px solid var(--line);padding-left:14px}
+.facts dt{font-size:11.5px;color:var(--ink-3);letter-spacing:.08em}
+.facts dd{margin:0;font-family:var(--serif);font-weight:800;font-size:clamp(16px,4.4vw,21px);line-height:1.5}
+.cta{align-self:flex-start;display:inline-flex;align-items:center;gap:10px;background:var(--ink);color:var(--paper);text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:999px}
+.cta:focus-visible{outline:2px solid var(--moon);outline-offset:3px}
+
+/* what is */
+.quote{font-family:var(--serif);font-weight:600;font-size:clamp(19px,4.6vw,23px);line-height:1.8;border-left:3px solid var(--moon);padding-left:20px}
+.principles{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px}
+.principles li{border-top:1px solid var(--line);padding:16px 0 18px;display:flex;flex-direction:column;gap:4px}
+.principles b{font-family:var(--serif);font-weight:800;font-size:18px}
+.principles span{font-size:14.5px;color:var(--ink-2);line-height:1.75}
+@media (max-width:560px){.principles{grid-template-columns:minmax(0,1fr)}}
+
+/* need */
+.need{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.need li{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column}
+.need b{font-size:15px}
+.need span{font-size:13.5px;color:var(--ink-2);line-height:1.7}
+@media (max-width:480px){.need{grid-template-columns:minmax(0,1fr)}}
+
+/* tips */
+.tips{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0}
+.tips li{display:grid;grid-template-columns:52px minmax(0,1fr);gap:14px;padding:18px 0;border-top:1px solid var(--line)}
+.tips li:last-child{border-bottom:1px solid var(--line)}
+.tips .n{font-family:var(--serif);font-weight:800;font-size:34px;line-height:1.1;color:var(--moon)}
+.tips h3{font-size:18px;margin-bottom:4px}
+.tips p{font-size:15px;color:var(--ink-2)}
+.keys{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px;font-size:14px;color:var(--ink-2)}
+
+/* steps */
+.steps{display:flex;flex-direction:column;gap:64px}
+.steps-intro{display:flex;flex-direction:column;gap:12px}
+.step{gap:0}
+.step-head{display:grid;grid-template-columns:48px minmax(0,1fr);gap:16px;align-items:center}
+.step-head .mn{width:48px;height:48px}
+.step-head .mn .base{fill:var(--moon-off)}
+.step-head .mn .lit{fill:var(--rail)}
+.step.done .step-head .mn .lit{fill:var(--moon)}
+.step-head .no{font-family:var(--mono);font-size:12px;letter-spacing:.16em;color:var(--moon-ink)}
+.step-head h2{font-size:clamp(22px,5.4vw,28px)}
+.step-head .time{font-size:13px;color:var(--ink-3)}
+.step-body{margin-left:23px;padding:22px 0 4px 39px;border-left:1px dashed var(--rail);display:flex;flex-direction:column;gap:18px}
+@media (max-width:520px){.step-body{margin-left:23px;padding-left:20px}}
+.step:last-child .step-body{border-left-color:transparent}
+.done-toggle{display:inline-flex;align-items:center;gap:10px;font-size:14px;font-weight:500;color:var(--ink-2);cursor:pointer;user-select:none;align-self:flex-start;padding:9px 16px;border:1px solid var(--line);border-radius:999px;background:var(--surface)}
+.done-toggle input{width:18px;height:18px;accent-color:var(--ok);margin:0}
+.step.done .done-toggle{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.done-toggle:focus-within{outline:2px solid var(--moon);outline-offset:2px}
+ol.do{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px}
+ol.do li::marker{font-family:var(--mono);font-weight:600;color:var(--moon-ink)}
+.sub{font-size:18px;display:flex;align-items:baseline;gap:10px;margin-top:8px}
+.sub i{font-style:normal;font-family:var(--mono);font-size:12px;color:var(--moon-ink);font-weight:600}
+
+/* command with copy */
+.cmd{display:flex;align-items:stretch;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+.cmd pre{margin:0;padding:12px 14px;flex:1;min-width:0;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6;color:var(--ink);white-space:pre}
+.cmd pre::before{content:"$ ";color:var(--ink-3)}
+.cmd button{flex:none;border:0;border-left:1px solid var(--line);background:var(--mist);color:var(--ink);font-family:var(--body);font-size:13px;font-weight:700;padding:0 16px;cursor:pointer;min-width:84px}
+.cmd button:hover{background:var(--moon-soft)}
+.cmd button:focus-visible{outline:2px solid var(--moon);outline-offset:-2px}
+.cmd button.copied{background:var(--ok-soft);color:var(--ok)}
+
+/* screen mockups */
+figure{margin:0;display:flex;flex-direction:column;gap:8px}
+figcaption{font-size:13px;color:var(--ink-3);text-align:center}
+.win{border-radius:12px;overflow:hidden;box-shadow:0 14px 34px -16px rgba(17,27,51,.45);border:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:7px;padding:9px 12px;background:var(--term-bar)}
+.bar i{width:11px;height:11px;border-radius:50%;display:block}
+.bar i:nth-child(1){background:#FF5F57}.bar i:nth-child(2){background:#FEBC2E}.bar i:nth-child(3){background:#28C840}
+.bar span{flex:1;text-align:center;font-size:12px;color:var(--term-dim);font-family:var(--mono);margin-right:40px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.term pre{margin:0;padding:14px 16px;background:var(--term);color:var(--term-fg);font-family:var(--mono);font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre}
+.term .p{color:var(--term-dim)} .term .c{color:#fff;font-weight:600} .term .d{color:var(--term-dim)}
+.term .g{color:var(--term-green)} .term .y{color:var(--term-gold)}
+.term .hl{background:rgba(240,201,105,.16);outline:1px dashed var(--term-gold);border-radius:3px}
+.term .cur{display:inline-block;width:8px;height:1.1em;background:var(--term-fg);vertical-align:text-bottom;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.term .cur{animation:none}}
+.browser .bar{background:#E9EDF4}
+.browser .bar span{background:#fff;border-radius:6px;padding:2px 10px;color:#4F5D7A;margin-right:0}
+.page{background:#fff;color:#1B2A4A;padding:24px 20px;display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;font-size:14px}
+.page .logo{font-weight:700;font-size:22px}
+.page .btn{background:#1B2A4A;color:#fff;border-radius:8px;padding:8px 22px;font-weight:700;font-size:14px}
+.page .btn.green{background:#1F883D}
+.page .field{width:min(260px,100%);border:1px solid #D0D7DE;border-radius:6px;padding:6px 10px;text-align:left;color:#57606A;font-size:13px}
+.page .small{font-size:12px;color:#57606A}
+.dialog{background:#F5F6F8;color:#1B2A4A;padding:20px;display:grid;grid-template-columns:48px minmax(0,1fr);gap:14px;font-size:13px;line-height:1.6}
+.dialog .ic{width:48px;height:48px;border-radius:11px;background:linear-gradient(160deg,#2B3550,#0E1424);display:grid;place-items:center;color:#7FD1A8;font-family:var(--mono);font-weight:600}
+.dialog .btns{grid-column:1 / -1;display:flex;justify-content:flex-end;gap:8px}
+.dialog .btns span{padding:4px 16px;border-radius:6px;background:#fff;border:1px solid #D0D7DE}
+.dialog .btns span.pri{background:#0A66E8;border-color:#0A66E8;color:#fff}
+
+.ok,.warn{display:flex;gap:12px;align-items:flex-start;border-radius:12px;padding:12px 16px;font-size:15px;color:var(--ink)}
+.ok{background:var(--ok-soft)} .warn{background:var(--warn-soft)}
+.ok::before,.warn::before{flex:none;font-size:11px;font-weight:700;color:var(--surface);border-radius:5px;padding:1px 7px;margin-top:5px;line-height:1.7}
+.ok::before{content:"成功";background:var(--ok)}
+.warn::before{content:"大事";background:var(--warn)}
+
+/* tables */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.tbl table{border-collapse:collapse;width:100%;font-size:14px;min-width:480px;line-height:1.7}
+.tbl th,.tbl td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.tbl th{font-size:12px;letter-spacing:.06em;color:var(--ink-3);font-weight:500;background:var(--mist)}
+.tbl tr:last-child td{border-bottom:0}
+.tbl td code{white-space:nowrap;word-break:normal}
+
+/* finish: the reader's own moon */
+.finish{position:relative;overflow:hidden;border-radius:24px;background:radial-gradient(120% 90% at 50% 0%,var(--night-2),var(--night));color:var(--night-fg);
+  padding:44px 24px 36px;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center}
+.finish::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.7;
+  background-image:radial-gradient(1px 1px at 12% 22%,#fff,transparent),radial-gradient(1px 1px at 78% 14%,#fff,transparent),radial-gradient(1.5px 1.5px at 88% 52%,#fff,transparent),
+  radial-gradient(1px 1px at 22% 70%,#fff,transparent),radial-gradient(1px 1px at 60% 84%,#fff,transparent),radial-gradient(1.5px 1.5px at 35% 38%,#fff,transparent),radial-gradient(1px 1px at 92% 88%,#fff,transparent)}
+.finish > *{position:relative}
+.finish .big{width:120px;height:120px;filter:drop-shadow(0 0 28px rgba(235,194,100,.45))}
+.finish .big .base{fill:#26314F}
+.finish .big .lit{fill:#F2CD72}
+.finish h2{font-size:clamp(24px,6vw,30px)}
+.finish p{color:var(--night-dim);font-size:15px}
+.finish .cmd{width:min(300px,100%);background:#0B1222;border-color:#2A3656;text-align:left}
+.finish .cmd pre{color:#fff}
+.finish ol{width:min(420px,100%);text-align:left;color:var(--night-dim);font-size:15px;padding-left:1.4em;display:grid;gap:6px}
+.finish ol code{overflow-wrap:anywhere}
+.finish .cmd button{background:#1C2747;color:#fff;border-left-color:#2A3656}
+.finish kbd{background:#1C2747;color:#fff;border-color:#34416A}
+
+footer{font-size:12.5px;color:var(--ink-3);text-align:center;display:flex;flex-direction:column;gap:4px;align-items:center}
+footer .mn{width:18px;height:18px}
+</style>
+</head>
+<body>
+
+<nav class="progress" aria-label="進み具合">
+  <div class="progress-in">
+    <ol class="phases" id="phases"></ol>
+    <div class="pright"><span id="ptext">0 / 6</span>
+    <button type="button" class="theme" id="theme" aria-label="ライトモードとダークモードを切り替え"><span class="t-l">☀︎ ライト</span><span class="t-d">☾ ダーク</span></button></div>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="kicker">はじめての方へ · Mac</p>
+  <h1><small>AIハーネス</small><span>LUN<em>A</em></span></h1>
+  <figure><img src="hero.jpg" alt="月を見上げる、ハーネスをつけた小さな犬と、ターミナルが開いたノートパソコン" width="1200" height="800"></figure>
+  <p class="lead">あなた専用のAIを、自分の Mac で育てるための仕組みです。このページを上から順に進めれば、パソコンに詳しくなくても動き出します。</p>
+  <dl class="facts">
+    <div><dt>所要</dt><dd>45〜60分</dd></div>
+    <div><dt>手順</dt><dd>6ステップ</dd></div>
+    <div><dt>中断</dt><dd>いつでもOK</dd></div>
+  </dl>
+  <a class="cta" href="#s1">ステップ1からはじめる <span aria-hidden="true">↓</span></a>
+</header>
+
+<section>
+  <p class="kicker">What is LUNA</p>
+  <h2>LUNA とは</h2>
+  <p class="quote">犬の散歩につけるハーネスを思い浮かべてください。走り出しそうになっても、体をそっと支えて道を外れさせない。</p>
+  <p>LUNA は、賢いけれど忘れっぽいAIにつける、そういう<b>枠</b>です。中のAIが新しいものに入れ替わっても、枠とあなたの記録はそのまま残ります。</p>
+  <ul class="principles">
+    <li><b>忘れない</b><span>大事なことはファイルに残ります。次に開いたとき、AIはそれを読んでから話します。</span></li>
+    <li><b>嘘をつかない</b><span>記録にないことは「わかりません」と言います。思い出したふりで作り話をしません。</span></li>
+    <li><b>決めるのはあなた</b><span>AIが新しく覚えることは、あなたが OK を出してはじめて記録になります。</span></li>
+    <li><b>毎回ブリーフから</b><span>開くたびに、今日やること、締切、忘れてはいけないことを最初に教えてくれます。</span></li>
+  </ul>
+  <p class="note">仕事、暮らし、発信、事業。分野ごとに引き出しを分けて、使うほどあなたの文脈が貯まります。中身はあなたの Mac と、あなただけが開ける金庫（GitHub）に置かれます。AIの名前はセットアップで自由に決められます。</p>
+</section>
+
+<section>
+  <p class="kicker">Before you start</p>
+  <h2>用意するもの</h2>
+  <ul class="need">
+    <li><b>Mac</b><span>新しくても古くても大丈夫です</span></li>
+    <li><b>Claude の有料プラン</b><span>月額の「Pro」以上。<a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> で申し込めます</span></li>
+    <li><b>メールアドレス</b><span>GitHub（ギットハブ）の登録に使います</span></li>
+    <li><b>Mac のパスワード</b><span>途中で何度か聞かれます</span></li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Three tips</p>
+  <h2>最初に知っておく3つのこと</h2>
+  <p>このページでは「ターミナル」という、<b>文字で Mac に指示を出す画面</b>を使います。コツは3つだけです。</p>
+  <ol class="tips">
+    <li><span class="n">1</span><div><h3>コマンドは、コピーして貼り付ける</h3><p>自分で打たなくて大丈夫です。各コマンドの右にある「コピー」を押して、ターミナルに貼り付けます。</p>
+      <div class="keys"><kbd>⌘ command</kbd>＋<kbd>V</kbd> で貼り付け → <kbd>return</kbd></div></div></li>
+    <li><span class="n">2</span><div><h3>自分で打つときは「英数」で</h3><p>日本語入力のままだと、Mac は指示を理解できません。全角スペースもエラーのもとです。</p>
+      <div class="keys">打つ前に <kbd>英数</kbd> を押す</div></div></li>
+    <li><span class="n">3</span><div><h3>パスワードは、打っても何も出ない</h3><p><code>Password:</code> と出たら Mac のパスワードを打って <kbd>return</kbd>。●●● すら出ませんが、ちゃんと入っています。</p></div></li>
+  </ol>
+</section>
+
+<div class="steps">
+<div class="steps-intro">
+  <p class="kicker">Setup</p>
+  <h2 style="font-size:clamp(26px,6vw,34px)">6つのステップ</h2>
+  <p class="note">終わったステップに印をつけておくと、次に開いたときに続きがわかります。</p>
+</div>
+
+<!-- STEP 1 -->
+<section class="step" id="s1" data-step="1">
+  <div class="step-head"><span data-moon="1"></span><div><span class="no">STEP 01 · 5分</span><h2>ターミナルのアプリを入れる</h2><span class="time">iTerm2（アイターム・ツー）</span></div></div>
+  <div class="step-body">
+  <figure>
+    <div class="win browser"><div class="bar"><i></i><i></i><i></i><span>iterm2.com</span></div>
+      <div class="page"><div class="logo">iTerm2</div><div class="small">macOS Terminal Replacement</div><div class="btn">Download</div></div></div>
+    <figcaption>サイトを開いて「Download」を押す</figcaption>
+  </figure>
+  <ol class="do">
+    <li><a href="https://iterm2.com" target="_blank" rel="noopener">iterm2.com</a> を開き、<b>Download</b> を押す</li>
+    <li>「ダウンロード」フォルダにできた <b>iTerm</b> を、<b>「アプリケーション」フォルダ</b>にドラッグ</li>
+    <li>「アプリケーション」の <b>iTerm</b> をダブルクリック</li>
+    <li>下のような確認が出たら <b>「開く」</b></li>
+  </ol>
+  <figure>
+    <div class="win"><div class="dialog"><div class="ic">&gt;_</div><div><b>“iTerm”はインターネットからダウンロードされたアプリケーションです。開いてもよろしいですか？</b></div><div class="btns"><span>キャンセル</span><span class="pri">開く</span></div></div></div>
+  </figure>
+  <figure>
+    <div class="win term"><div class="bar"><i></i><i></i><i></i><span>iTerm2</span></div><pre><span class="d">Last login: Fri Oct 16 10:20:01 on console</span>
+<span class="p">you@MacBook ~ %</span> <span class="cur"></span></pre></div>
+    <figcaption>これが出れば準備完了。最後の <code>%</code> の後ろに貼り付けていきます</figcaption>
+  </figure>
+  <p class="note">次から iTerm を開くには：<kbd>⌘ command</kbd>＋<kbd>スペース</kbd> → <code>iterm</code> → <kbd>return</kbd></p>
+  <label class="done-toggle"><input type="checkbox">このステップは終わった</label>
+  </div>
+</section>
+
+<!-- STEP 2 -->
+<section class="step" id="s2" data-step="2">
+  <div class="step-head"><span data-moon="2"></span><div><span class="no">STEP 02 · 15〜20分</span><h2>Homebrew（ホームブルー）を入れる</h2><span class="time">道具の App Store</span></div></div>
+  <div class="step-body">
+  <p>Homebrew は、AI を動かすのに必要な道具をまとめて入れてくれる仕組みです。スマホの「App Store」のようなものです。次の1行をコピーして、iTerm に貼り付けて <kbd>return</kbd>。</p>
+  <div class="cmd"><pre>/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"</pre><button type="button">コピー</button></div>
+  <ol class="do">
+    <li><code>Password:</code> と出たら、Mac のパスワードを打って <kbd>return</kbd></li>
+    <li><code>Press RETURN/ENTER to continue</code> と出たら <kbd>return</kbd></li>
+    <li>文字がたくさん流れるので、<b>10〜20分待つ</b>。「コマンドライン・デベロッパ・ツール」の窓が出たら <b>「インストール」</b></li>
+  </ol>
+  <figure>
+    <div class="win term"><div class="bar"><i></i><i></i><i></i><span>iTerm2</span></div><pre><span class="d">==&gt; Installation successful!</span>
+
+<span class="g">==&gt; Next steps:</span>
+- Run these commands in your terminal to add Homebrew to your PATH:
+    <span class="hl">echo &gt;&gt; /Users/you/.zprofile</span>
+    <span class="hl">echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' &gt;&gt; /Users/you/.zprofile</span>
+    <span class="hl">eval "$(/opt/homebrew/bin/brew shellenv)"</span>
+<span class="p">you@MacBook ~ %</span> <span class="cur"></span></pre></div>
+    <figcaption>最後にこう出ます。点線で囲んだ行が、次に貼り付ける行です</figcaption>
+  </figure>
+  <div class="warn"><span><b>ここが一番大事です。</b> <code>Next steps:</code> の下に出た行を、<b>上から1行ずつ</b>コピーして貼り付け、<kbd>return</kbd>。画面に出たとおりでかまいません。多くの Mac では次の2行と同じです。</span></div>
+  <div class="cmd"><pre>echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' &gt;&gt; ~/.zprofile</pre><button type="button">コピー</button></div>
+  <div class="cmd"><pre>eval "$(/opt/homebrew/bin/brew shellenv)"</pre><button type="button">コピー</button></div>
+  <p>できたか確かめる：</p>
+  <div class="cmd"><pre>brew --version</pre><button type="button">コピー</button></div>
+  <div class="ok"><span><code>Homebrew 4.x.x</code> のように数字が出れば成功です。</span></div>
+  <label class="done-toggle"><input type="checkbox">このステップは終わった</label>
+  </div>
+</section>
+
+<!-- STEP 3 -->
+<section class="step" id="s3" data-step="3">
+  <div class="step-head"><span data-moon="3"></span><div><span class="no">STEP 03 · 10分</span><h2>GitHub（ギットハブ）に登録する</h2><span class="time">あなたのAIの金庫</span></div></div>
+  <div class="step-body">
+  <p>GitHub は、あなたのAIの中身（メモや記録）を預けておく<b>インターネット上の金庫</b>です。Mac が壊れても消えず、あなた以外には見えません。</p>
+  <h3 class="sub"><i>3-1</i>アカウントを作る（無料）</h3>
+  <figure>
+    <div class="win browser"><div class="bar"><i></i><i></i><i></i><span>github.com/signup</span></div>
+      <div class="page"><div class="logo">Sign up for GitHub</div><div class="field">Email</div><div class="field">Password</div><div class="field">Username（あとで使う）</div><div class="btn green">Continue</div></div></div>
+    <figcaption>メール、パスワード、ユーザー名（英数字）を決める</figcaption>
+  </figure>
+  <p><a href="https://github.com/signup" target="_blank" rel="noopener">github.com/signup</a> で登録し、届いたメールのコードを入れて完了します。</p>
+  <h3 class="sub"><i>3-2</i>Mac から GitHub につなぐ</h3>
+  <div class="cmd"><pre>brew install gh</pre><button type="button">コピー</button></div>
+  <div class="cmd"><pre>gh auth login</pre><button type="button">コピー</button></div>
+  <p>英語で質問が出ます。矢印キー <kbd>↑</kbd><kbd>↓</kbd> で選んで <kbd>return</kbd>。</p>
+  <div class="tbl"><table>
+    <tr><th>画面に出る質問</th><th>意味</th><th>選ぶもの</th></tr>
+    <tr><td>Where do you use GitHub?</td><td>どこの GitHub？</td><td><code>GitHub.com</code></td></tr>
+    <tr><td>What is your preferred protocol…?</td><td>つなぎ方は？</td><td><code>HTTPS</code></td></tr>
+    <tr><td>Authenticate Git with your GitHub credentials?</td><td>この Mac でもログインしておく？</td><td><code>Y</code> を打って return</td></tr>
+    <tr><td>How would you like to authenticate…?</td><td>どうやってログインする？</td><td><code>Login with a web browser</code></td></tr>
+  </table></div>
+  <figure>
+    <div class="win term"><div class="bar"><i></i><i></i><i></i><span>iTerm2</span></div><pre><span class="g">?</span> Where do you use GitHub? <span class="y">GitHub.com</span>
+<span class="g">?</span> What is your preferred protocol for Git operations? <span class="y">HTTPS</span>
+<span class="g">?</span> Authenticate Git with your GitHub credentials? <span class="y">Yes</span>
+<span class="g">?</span> How would you like to authenticate GitHub CLI? <span class="y">Login with a web browser</span>
+
+<span class="y">!</span> First copy your one-time code: <span class="hl">1A2B-3C4D</span>
+Press Enter to open github.com in your browser...
+<span class="g">✓</span> Authentication complete.
+<span class="g">✓</span> Logged in as <span class="c">yourname</span></pre></div>
+    <figcaption>コード（例：1A2B-3C4D）を控えて return → ブラウザで入力して「Authorize」</figcaption>
+  </figure>
+  <div class="ok"><span><code>✓ Logged in as あなたのユーザー名</code> と出れば成功です。</span></div>
+  <label class="done-toggle"><input type="checkbox">このステップは終わった</label>
+  </div>
+</section>
+
+<!-- STEP 4 -->
+<section class="step" id="s4" data-step="4">
+  <div class="step-head"><span data-moon="4"></span><div><span class="no">STEP 04 · 3分</span><h2>Claude Code を入れる</h2><span class="time">AIの本体</span></div></div>
+  <div class="step-body">
+  <div class="cmd"><pre>curl -fsSL https://claude.ai/install.sh | bash</pre><button type="button">コピー</button></div>
+  <div class="warn"><span>終わったら、<b>iTerm を一度完全に終了</b>（<kbd>⌘ command</kbd>＋<kbd>Q</kbd>）して、開き直してください。新しく入れたものを Mac に気づかせるためです。</span></div>
+  <div class="cmd"><pre>claude --version</pre><button type="button">コピー</button></div>
+  <div class="ok"><span><code>2.x.x (Claude Code)</code> のように数字が出れば成功です。</span></div>
+  <label class="done-toggle"><input type="checkbox">このステップは終わった</label>
+  </div>
+</section>
+
+<!-- STEP 5 -->
+<section class="step" id="s5" data-step="5">
+  <div class="step-head"><span data-moon="5"></span><div><span class="no">STEP 05 · 2分</span><h2>あなた専用のAIを作る</h2><span class="time">ひな形をコピー</span></div></div>
+  <div class="step-body">
+  <p>3行を、1行ずつ貼り付けて <kbd>return</kbd>。</p>
+  <div class="cmd"><pre>mkdir -p ~/Claude &amp;&amp; cd ~/Claude</pre><button type="button">コピー</button></div>
+  <div class="cmd"><pre>gh repo create my-ai --private --template a81359441/luna-os --clone</pre><button type="button">コピー</button></div>
+  <div class="cmd"><pre>cd my-ai</pre><button type="button">コピー</button></div>
+  <figure>
+    <div class="win term"><div class="bar"><i></i><i></i><i></i><span>iTerm2</span></div><pre><span class="p">you@MacBook Claude %</span> <span class="c">gh repo create my-ai --private --template ...</span>
+<span class="g">✓</span> Created repository yourname/my-ai on GitHub
+Cloning into 'my-ai'...
+<span class="p">you@MacBook Claude %</span> <span class="c">cd my-ai</span>
+<span class="p">you@MacBook my-ai %</span> <span class="cur"></span></pre></div>
+    <figcaption>行の頭が <code>my-ai %</code> になれば、自分のAIのフォルダの中にいます</figcaption>
+  </figure>
+  <label class="done-toggle"><input type="checkbox">このステップは終わった</label>
+  </div>
+</section>
+
+<!-- STEP 6 -->
+<section class="step" id="s6" data-step="6">
+  <div class="step-head"><span data-moon="6"></span><div><span class="no">STEP 06 · 10分</span><h2>はじめて話しかける</h2><span class="time">ここから日本語</span></div></div>
+  <div class="step-body">
+  <div class="cmd"><pre>claude "setup"</pre><button type="button">コピー</button></div>
+  <p>最初の1回だけ、英語でいくつか聞かれます。</p>
+  <div class="tbl"><table>
+    <tr><th>画面に出るもの</th><th>意味</th><th>すること</th></tr>
+    <tr><td>Choose the text style…</td><td>画面の色合い</td><td>好きなものを選んで return</td></tr>
+    <tr><td>Select login method</td><td>ログイン方法</td><td><code>Claude account with subscription</code></td></tr>
+    <tr><td>（ブラウザが開く）</td><td>Claude にログイン</td><td>いつものアカウントで「承認」</td></tr>
+    <tr><td>Do you trust the files in this folder?</td><td>このフォルダを信用する？</td><td><code>Yes, proceed</code></td></tr>
+  </table></div>
+  <p>ここを抜けると、AIが日本語で話しはじめます。名前、あなたの呼び方、いま頭を使っていること。1つずつ聞かれるので、普通に日本語で答えてください。AIの名前を決めると、その名前で呼び出せるようにAIが設定してくれます。途中で「実行してよいか」と英語で聞かれたら、<code>Yes</code> を選んでください。</p>
+  <figure>
+    <div class="win term"><div class="bar"><i></i><i></i><i></i><span>iTerm2 · claude</span></div><pre><span class="y">✻</span> Welcome to <span class="c">Claude Code</span>
+
+<span class="g">●</span> はじめまして。最初に3つだけ決めましょう。
+  まず、わたしのことを何と呼びたいですか？
+  （例：ルナ、ハル、相棒）
+
+<span class="p">&gt;</span> <span class="cur"></span></pre></div>
+    <figcaption>やり取りの一例。普通に日本語で答えれば完成です</figcaption>
+  </figure>
+  <label class="done-toggle"><input type="checkbox">このステップは終わった</label>
+  </div>
+</section>
+</div>
+
+<div class="finish" id="finish">
+  <span data-moon="big"></span>
+  <h2>お疲れさまでした</h2>
+  <p>次からは、iTerm を開いて、AIの名前（英小文字）を打つだけです。たとえば名前がルナなら：</p>
+  <div class="cmd"><pre>luna</pre><button type="button">コピー</button></div>
+  <p>話が一段落したら「締めて」。AIがその日の内容を記録します。<br>終わるときは <kbd>control</kbd>＋<kbd>C</kbd> を2回。</p>
+  <p><strong>ときどき「ログインして」と言われたら</strong>（<code>Please run /login</code> など。故障ではありません）</p>
+  <ol>
+    <li>入力欄に <code>/login</code> と打って return（選択肢がもう出ていれば飛ばす）</li>
+    <li>3つの選択肢から <strong>1番の <code>Claude account with subscription</code></strong> を選ぶ。ほかの2つは選ばない</li>
+    <li>ブラウザが開くので、いつものアカウントでログインして「承認」</li>
+    <li>iTerm に戻る（<kbd>⌘ command</kbd>＋<kbd>tab</kbd>）。そのまま話の続きができます</li>
+  </ol>
+</div>
+
+<section>
+  <p class="kicker">Troubleshooting</p>
+  <h2>うまくいかないとき</h2>
+  <p>まず、iTerm を完全に終了して（<kbd>⌘ command</kbd>＋<kbd>Q</kbd>）開き直してください。これだけで直ることがとても多いです。</p>
+  <div class="tbl"><table>
+    <tr><th>画面に出た言葉</th><th>よくある原因</th><th>直し方</th></tr>
+    <tr><td><code>command not found: brew</code></td><td>ステップ2の最後の行を貼り忘れた</td><td>その行を貼り付けて、iTerm を開き直す</td></tr>
+    <tr><td><code>command not found: claude</code> やAIの名前</td><td>Mac が新しい道具にまだ気づいていない</td><td>下の1行を貼り付けて、開き直す</td></tr>
+    <tr><td>プランがない、と言われる</td><td>Claude が無料プランのまま</td><td>claude.ai で Pro 以上にして、入力欄で <code>/login</code></td></tr>
+    <tr><td>反応しない、変な文字が出る</td><td>日本語入力のまま打った</td><td><kbd>英数</kbd> を押して、コピー＆貼り付けでやり直す</td></tr>
+  </table></div>
+  <div class="cmd"><pre>echo 'export PATH="$HOME/.local/bin:$PATH"' &gt;&gt; ~/.zshrc</pre><button type="button">コピー</button></div>
+  <p class="note">ステップ6まで進めていれば、エラーをAIに貼り付けて「これは何？」と聞けば教えてくれます。その前なら、画面のスクリーンショット（<kbd>⌘</kbd>＋<kbd>shift</kbd>＋<kbd>4</kbd>）を、このページをくれた人に送ってください。</p>
+</section>
+
+<footer><span data-moon="foot"></span>AIハーネス LUNA<span>画面の例はわかりやすくするための見本です。実際の表示は少し違うことがあります。</span></footer>
+</div>
+
+<script>
+(function(){
+  var N=6, NS='http://www.w3.org/2000/svg';
+  // A waxing moon lit by fraction f (0 new, 1 full), lit side on the right.
+  function moon(f,size,cls){
+    var r=10,c=12,rx=Math.abs(1-2*f)*r,sw=f<.5?0:1;
+    var d='M'+c+' '+(c-r)+'A'+r+' '+r+' 0 0 1 '+c+' '+(c+r)+'A'+rx+' '+r+' 0 0 '+sw+' '+c+' '+(c-r)+'Z';
+    var s=document.createElementNS(NS,'svg');s.setAttribute('viewBox','0 0 24 24');s.setAttribute('class','mn'+(cls?' '+cls:''));
+    s.setAttribute('aria-hidden','true');if(size){s.setAttribute('width',size);s.setAttribute('height',size);}
+    s.innerHTML='<circle class="base" cx="12" cy="12" r="10"/>'+(f>0?'<path class="lit" d="'+d+'"/>':'');
+    return s;
+  }
+  document.querySelectorAll('[data-moon]').forEach(function(el){
+    var k=el.getAttribute('data-moon');
+    if(k==='big'||k==='foot')return;
+    el.replaceWith(moon(+k/N,48));
+  });
+  var foot=document.querySelector('[data-moon="foot"]'); if(foot)foot.replaceWith(moon(.3,18));
+  var bigSlot=document.querySelector('[data-moon="big"]');
+  var phases=document.getElementById('phases');
+  for(var i=1;i<=N;i++){
+    var li=document.createElement('li'),a=document.createElement('a');
+    a.href='#s'+i;a.setAttribute('aria-label','ステップ'+i);a.appendChild(moon(i/N,20));li.appendChild(a);phases.appendChild(li);
+  }
+
+  document.querySelectorAll('.cmd button').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      var pre=btn.parentNode.querySelector('pre'); var text=pre.textContent;
+      function done(){btn.textContent='コピー済み';btn.classList.add('copied');setTimeout(function(){btn.textContent='コピー';btn.classList.remove('copied');},1800);}
+      function fallback(){var r=document.createRange();r.selectNodeContents(pre);var s=window.getSelection();s.removeAllRanges();s.addRange(r);btn.textContent='選択済み ⌘C';}
+      try{navigator.clipboard.writeText(text).then(done,fallback);}catch(e){fallback();}
+    });
+  });
+
+  var TKEY='luna-theme',root=document.documentElement;
+  try{var saved=localStorage.getItem(TKEY);if(saved==='light'||saved==='dark')root.setAttribute('data-theme',saved);}catch(e){}
+  function isDark(){var t=root.getAttribute('data-theme');return t?t==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;}
+  document.getElementById('theme').addEventListener('click',function(){
+    var next=isDark()?'light':'dark';root.setAttribute('data-theme',next);
+    try{localStorage.setItem(TKEY,next);}catch(e){}
+  });
+
+  var KEY='luna-setup-done';
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'{}');}catch(e){return {};}}
+  function save(s){try{localStorage.setItem(KEY,JSON.stringify(s));}catch(e){}}
+  var state=load();
+  function render(){
+    var n=0;
+    document.querySelectorAll('.step').forEach(function(sec){
+      var id=sec.getAttribute('data-step'),on=!!state[id];
+      sec.classList.toggle('done',on);sec.querySelector('input').checked=on;
+      phases.children[id-1].classList.toggle('on',on); if(on)n++;
+    });
+    document.getElementById('ptext').textContent=n+' / '+N;
+    var big=moon(n/N,120,'big'); bigSlot.replaceWith(big); bigSlot=big;
+  }
+  document.querySelectorAll('.step input').forEach(function(inp){
+    inp.addEventListener('change',function(){var id=inp.closest('.step').getAttribute('data-step');state[id]=inp.checked;save(state);render();});
+  });
+  render();
+})();
+</script>
+</body>
+</html>

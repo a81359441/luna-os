@@ -1,0 +1,788 @@
+#!/usr/bin/env python3
+"""lint。このナレッジ・リポジトリの衛生状態を、決定的に検査する。
+
+`self-diagnose`（自己診断）の**機械でできる半分**をここに移したもの。
+数えられることはスクリプトが毎回正確に数え、モデルは**その結果について
+考える**ことに集中する。文脈が膨らむほどモデルの目視は当てにならなくなるので、
+数える仕事をモデルから取り上げるのが目的。
+
+使い方:
+    bin/lint            リポジトリ全体（構造・鮮度・git）
+    bin/lint --diff     未コミットの編集だけ（コミット前のゲート）
+    bin/lint --branch   このブランチが origin/main から変えたもの全部
+    bin/lint --quiet    指摘だけ。問題なしの行は出さない
+    bin/lint --health   健康状態の1行要約（健康なら空）
+    bin/lint --emdash-only
+                        追加行のダッシュ検査だけ（フック用の高速経路）
+
+終了コード: 0 = 指摘なし、1 = 指摘あり。依存は python3 と git だけ。
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DOMAINS = ROOT / "knowledge" / "domains"
+MASTER_INDEX = ROOT / "knowledge" / "index.md"
+STATE = ROOT / "state.md"
+
+# U+2014 EM DASH と U+2015 HORIZONTAL BAR。U+30FC（カタカナの長音「ー」）と
+# U+2212（マイナス）は**意図的に対象外**。あれは正当な日本語・数式の文字。
+EM_DASHES = "—―"
+# U+2500（罫線）と U+2013（en ダッシュ）は罫線や範囲としては正当。ただし
+# 語と語の間に、両側に空白をつけて1文字だけ置かれたものは、変装したダッシュ
+# （「燃料 ─ これが命綱」のような書き方）。罫線文字の連続は、隣が罫線文字か
+# 空白なので引っかからない。両側が数字なら時刻や数値の範囲であって、文の区切りではない。
+DISGUISED = "─–"
+EM_DASH_RE = re.compile(
+    f"[{EM_DASHES}]"
+    f"|(?<=[^\\s\\d{DISGUISED}]) [{DISGUISED}] (?=[^\\s{DISGUISED}])"
+    f"|(?<=\\d) [{DISGUISED}] (?=[^\\s\\d{DISGUISED}])"
+)
+
+# 他人の原文をそのまま保存する場所。憲法が認めているダッシュ禁止の唯一の例外。
+# 一次情報のフォルダを増やしたらここに足すこと。
+PRIMARY_SOURCE_DIRS = ("knowledge/domains/diary/entries/",)
+
+REQUIRED_NOTE_KEYS = ("title", "date", "type", "sources", "ventures", "tags", "status")
+
+RESET, BOLD, RED, YEL, GRN, DIM = "\033[0m", "\033[1m", "\033[31m", "\033[33m", "\033[32m", "\033[2m"
+if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    RESET = BOLD = RED = YEL = GRN = DIM = ""
+
+
+class Report:
+    def __init__(self, quiet: bool = False) -> None:
+        self.quiet = quiet
+        self.findings = 0
+        self._pending: str | None = None
+
+    def section(self, title: str) -> None:
+        # 保持するだけで、まだ出さない。静かな実行で指摘ゼロなら**何も**
+        # 出力してはいけない。出力の有無で判断するフックが、見出しそのものを
+        # 指摘だと誤解するため。
+        self._pending = title
+
+    def _header(self) -> None:
+        if self._pending is not None:
+            print(f"\n{BOLD}{self._pending}{RESET}")
+            self._pending = None
+
+    def fail(self, msg: str) -> None:
+        self.findings += 1
+        self._header()
+        print(f"  {RED}✗{RESET} {msg}")
+
+    def warn(self, msg: str) -> None:
+        self.findings += 1
+        self._header()
+        print(f"  {YEL}!{RESET} {msg}")
+
+    def ok(self, msg: str) -> None:
+        if not self.quiet:
+            self._header()
+            print(f"  {GRN}✓{RESET} {msg}")
+
+    def info(self, msg: str) -> None:
+        if not self.quiet:
+            self._header()
+            print(f"    {DIM}{msg}{RESET}")
+
+    def row(self, msg: str) -> None:
+        """問題が無くても見出しの下に出したい表の行。"""
+        self._header()
+        print(msg)
+
+
+def git(*args: str) -> str:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True, text=True, timeout=15,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def tracked_markdown() -> list[Path]:
+    out = git("ls-files", "*.md")
+    return [ROOT / p for p in out.splitlines() if p]
+
+
+def changed_markdown(whole_branch: bool = False) -> list[Path]:
+    """強制検査の対象になる Markdown。
+
+    既定は**未コミットの編集だけ**（staged + unstaged + 未追跡）。
+    「今それを書いたか」という質問であり、止める価値があるのはそこだけ。
+    whole_branch: このブランチが origin/main から変えたもの全部。広く取れる
+    かわりに、触っただけのファイルの古い文章まで出てくる。ゲートではなくレビュー用。
+    """
+    cmds = [("diff", "--name-only"), ("diff", "--name-only", "--cached")]
+    if whole_branch:
+        base = "origin/main" if git("rev-parse", "--verify", "--quiet", "origin/main") else "main"
+        cmds.insert(0, ("diff", "--name-only", f"{base}...HEAD"))
+    names: set[str] = set()
+    for cmd in cmds:
+        for line in git(*cmd).splitlines():
+            if line.endswith(".md"):
+                names.add(line)
+    for line in git("ls-files", "--others", "--exclude-standard").splitlines():
+        if line.endswith(".md"):
+            names.add(line)
+    return [ROOT / n for n in sorted(names) if (ROOT / n).exists()]
+
+
+def added_lines() -> list[tuple[str, int, str]]:
+    """この作業ツリーが**追加する**行。(パス, 行番号, 本文) で返す。
+
+    ゲートが裁くのは**自分が書いたもの**であって、たまたま触ったファイルに
+    元からあった文章ではない。追跡済みの編集は `git diff -U0` を読み、
+    未追跡のファイルは丸ごと対象にする。
+    """
+    out: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+    for cmd in (("diff", "-U0"), ("diff", "-U0", "--cached")):
+        path, lineno = None, 0
+        for line in git(*cmd).splitlines():
+            if line.startswith("+++ b/"):
+                path = line[6:]
+            elif line.startswith("@@"):
+                m = re.search(r"\+(\d+)", line)
+                lineno = int(m.group(1)) if m else 0
+            elif line.startswith("+") and not line.startswith("+++") and path:
+                if path.endswith(".md") and (path, lineno) not in seen:
+                    seen.add((path, lineno))
+                    out.append((path, lineno, line[1:]))
+                lineno += 1
+    for path in git("ls-files", "--others", "--exclude-standard").splitlines():
+        if not path.endswith(".md"):
+            continue
+        f = ROOT / path
+        try:
+            for i, text in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                out.append((path, i, text))
+        except (OSError, UnicodeDecodeError):
+            continue
+    return out
+
+
+def domain_dirs() -> list[Path]:
+    """本物のドメインのフォルダ。`_template` のような雛形は数えない。"""
+    if not DOMAINS.is_dir():
+        return []
+    return sorted(p for p in DOMAINS.iterdir()
+                  if p.is_dir() and not p.name.startswith((".", "_")))
+
+
+def rel(p: Path) -> str:
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def is_primary_source(p: Path) -> bool:
+    r = rel(p)
+    return any(r.startswith(d) for d in PRIMARY_SOURCE_DIRS)
+
+
+# ---------------------------------------------------------------- 検査
+
+def check_em_dashes(r: Report, files: list[Path], enforcing: bool) -> None:
+    label = "追加行" if enforcing else "追跡ファイル"
+    r.section(f"ダッシュ検査 / {label}（ハードルール: どの言語・どのドメインでも禁止）")
+    hits: list[tuple[str, int, str]] = []
+    if enforcing:
+        # このツリーが追加した分だけを裁く。触っただけのファイルの古い文章は
+        # 「今回の違反」ではない。
+        for path, lineno, text in added_lines():
+            if any(path.startswith(d) for d in PRIMARY_SOURCE_DIRS):
+                continue
+            if EM_DASH_RE.search(text):
+                hits.append((path, lineno, text.strip()[:90]))
+    else:
+        for f in files:
+            if is_primary_source(f):
+                continue
+            try:
+                for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                    if EM_DASH_RE.search(line):
+                        hits.append((rel(f), i, line.strip()[:90]))
+            except (OSError, UnicodeDecodeError):
+                continue
+    if not hits:
+        r.ok("見つかりませんでした")
+        return
+    by_file: dict[str, int] = {}
+    for path, _, _ in hits:
+        by_file[path] = by_file.get(path, 0) + 1
+    if enforcing:
+        for path, line, text in hits[:25]:
+            r.fail(f"{path}:{line}  {text}")
+        if len(hits) > 25:
+            r.info(f"... ほか {len(hits) - 25} 件")
+    else:
+        r.warn(f"追跡ファイル {len(by_file)} 本に {len(hits)} 個のダッシュ（古い分の積み残しであって、今回の失敗ではない）")
+        for path, n in sorted(by_file.items(), key=lambda kv: -kv[1])[:8]:
+            r.info(f"{n:>4}  {path}")
+        r.info("`bin/lint --diff` なら変更したファイルだけを強制検査します")
+
+
+def check_note_frontmatter(r: Report, files: list[Path]) -> None:
+    r.section("リサーチノートのフロントマター")
+    notes = [f for f in files if "knowledge/domains/research/notes/" in rel(f)]
+    if not notes:
+        r.ok("対象にリサーチノートはありません")
+        return
+    bad = 0
+    for f in notes:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not text.startswith("---\n"):
+            r.fail(f"{rel(f)}: YAML フロントマターがありません")
+            bad += 1
+            continue
+        end = text.find("\n---", 4)
+        block = text[4:end] if end > 0 else ""
+        missing = [k for k in REQUIRED_NOTE_KEYS if not re.search(rf"^{k}\s*:", block, re.M)]
+        if missing:
+            r.fail(f"{rel(f)}: {', '.join(missing)} がありません")
+            bad += 1
+    if not bad:
+        r.ok(f"{len(notes)} 本、形式OK")
+
+
+FENCE_RE = re.compile(r"```.*?```", re.S)
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def strip_code(text: str) -> str:
+    """コードブロックとインラインコードを落とす。ウィキリンクの**説明文**に出てくる
+    `[[example]]` を、本物の（切れた）リンクと誤認しないため。"""
+    return INLINE_CODE_RE.sub("", FENCE_RE.sub("", text))
+
+
+def memory_dir() -> Path | None:
+    """このプロジェクト用の Claude Code 自動メモリの置き場。
+
+    ノートがメモリのスラグ（`[[...]]`）に張るリンクは正当で、実体は
+    リポジトリの外にあるだけ。端末やユーザー名に縛られないよう、
+    ハードコードではなくプロジェクトのパスから導出する。
+    """
+    d = Path.home() / ".claude" / "projects" / str(ROOT).replace("/", "-") / "memory"
+    return d if d.is_dir() else None
+
+
+def check_wikilinks(r: Report, files: list[Path]) -> None:
+    r.section("ウィキリンクが解決するか")
+    index: dict[str, Path] = {}
+    for p in ROOT.rglob("*.md"):
+        if ".git" in p.parts:
+            continue
+        index.setdefault(p.stem, p)
+    mem = memory_dir()
+    if mem:
+        for p in mem.glob("*.md"):
+            index.setdefault(p.stem, p)
+    dead: list[str] = []
+    for f in files:
+        if "knowledge/" not in rel(f):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for m in re.finditer(r"\[\[([^\]|#]+)", strip_code(text)):
+            target = m.group(1).strip()
+            if not target:
+                continue
+            candidate = (f.parent / f"{target}.md").resolve()
+            if candidate.exists():
+                continue
+            if Path(target).name in index:
+                continue
+            dead.append(f"{rel(f)} -> [[{target}]]")
+    if dead:
+        for d in dead[:20]:
+            r.fail(d)
+        if len(dead) > 20:
+            r.info(f"... ほか {len(dead) - 20} 件")
+    else:
+        r.ok("すべて解決します")
+
+
+def check_domain_registration(r: Report) -> None:
+    r.section("ドメインの登録（フォルダ ⇔ knowledge/index.md）")
+    if not DOMAINS.is_dir() or not MASTER_INDEX.exists():
+        r.fail("knowledge/domains か knowledge/index.md がありません")
+        return
+    folders = {p.name for p in domain_dirs()}
+    listed = set(re.findall(r"knowledge/domains/([a-z0-9\-_]+)/", MASTER_INDEX.read_text(encoding="utf-8")))
+    for ghost in sorted(listed - folders):
+        r.fail(f"索引にあるのにフォルダが無い: {ghost}")
+    for orphan in sorted(folders - listed):
+        r.fail(f"フォルダがあるのに索引に未登録: {orphan}")
+    if folders == listed:
+        r.ok(f"{len(folders)} ドメイン、すべて登録済み")
+
+
+def _last_log_date(domain: Path) -> date | None:
+    log = domain / "intentions-log.md"
+    if not log.exists():
+        return None
+    dates = re.findall(r"20\d{2}-\d{2}-\d{2}", log.read_text(encoding="utf-8"))
+    best: date | None = None
+    for d in dates:
+        try:
+            parsed = datetime.strptime(d, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        # ログが未来を記録することはない。今日より先の日付は、本文に引用された
+        # 締切や有効期限（ドメイン更新日など）であって、記入日ではない。
+        # これを数えると state.md が何百日も古いと誤判定される。
+        if parsed > date.today():
+            continue
+        if best is None or parsed > best:
+            best = parsed
+    return best
+
+
+def check_state_freshness(r: Report, today: date) -> None:
+    r.section("state.md の鮮度")
+    if not STATE.exists():
+        r.fail("state.md がありません")
+        return
+    m = re.search(r"\*\*(?:Last updated|最終更新)\*\*[:：]\s*(20\d{2}-\d{2}-\d{2})",
+                  STATE.read_text(encoding="utf-8"))
+    if not m:
+        if "セットアップ" in STATE.read_text(encoding="utf-8"):
+            r.info("state.md はまだセットアップ前です（`setup` が日付を入れます）")
+        else:
+            r.fail("state.md に '**最終更新**: YYYY-MM-DD' の行がありません")
+        return
+    stamped = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    newest, newest_domain = None, ""
+    for d in domain_dirs():
+        last = _last_log_date(d)
+        if last and (newest is None or last > newest):
+            newest, newest_domain = last, d.name
+    age = (today - stamped).days
+    if newest and newest > stamped:
+        r.warn(f"state.md は {stamped} だが {newest_domain} は {newest} に記録あり（実態より {(newest - stamped).days} 日遅れ）")
+    elif age > 21:
+        r.warn(f"state.md は {stamped} のまま（{age} 日前）")
+    else:
+        r.ok(f"{stamped}（{age} 日前）。これより新しいドメインの記録はありません")
+
+
+# state.md は最上位の要約なので、写しではなく指し先だけを持つ。行が段落に
+# 育つと、誰も更新しない日付つきの状況がそこに溜まって腐る。長さが最初の兆候。
+STATE_ROW_MAX = 220
+STATE_PRIORITY_MAX = 420
+UNTIL = re.compile(r"(?:until\s+\**(20\d{2}-\d{2}-\d{2}))|(?:(20\d{2}-\d{2}-\d{2})\s*まで)", re.I)
+
+
+def check_state_shape(r: Report, today: date) -> None:
+    r.section("state.md の形（写しではなく指し先）")
+    if not STATE.exists():
+        return
+    text = STATE.read_text(encoding="utf-8")
+    sections = re.split(r"^## ", text, flags=re.M)
+    body = {s.split("\n", 1)[0].strip(): s.split("\n", 1)[1] if "\n" in s else "" for s in sections[1:]}
+    bad = 0
+    for line in body.get("稼働中のドメイン", "").splitlines():
+        if not line.startswith("| ") or line.startswith("| ドメイン") or line.startswith("|---"):
+            continue
+        name = line.split("|")[1].strip()
+        slug = re.search(r"\(`([a-z0-9-]+)`\)", line)
+        if slug and not (DOMAINS / slug.group(1)).is_dir():
+            r.fail(f"稼働中のドメインの行が、存在しないドメインを指している: {slug.group(1)}")
+            bad += 1
+        if len(line) > STATE_ROW_MAX:
+            r.warn(f"稼働中のドメインの行が {len(line)} 字（上限 {STATE_ROW_MAX}）。詳細は索引へ: {name}")
+            bad += 1
+    for item in re.findall(r"^\d+\.\s.*$", body.get("今の優先事項", ""), flags=re.M):
+        if len(item) > STATE_PRIORITY_MAX:
+            r.warn(f"優先事項が {len(item)} 字（上限 {STATE_PRIORITY_MAX}）。方針だけ残し、ドメインを指す: {item[:40]}")
+            bad += 1
+    for m in UNTIL.finditer(text):
+        d = m.group(1) or m.group(2)
+        if datetime.strptime(d, "%Y-%m-%d").date() < today:
+            line = text[text.rfind("\n", 0, m.start()) + 1:text.find("\n", m.end())]
+            r.fail(f"期限切れ: {d} までの項目が過ぎている。消すか日付を直す: {line.strip()[:60]}")
+            bad += 1
+    if not bad:
+        r.ok("行は短く、優先事項も短く、期限切れなし")
+
+
+def check_maintenance_ratio(r: Report, today: date) -> None:
+    """儀式のコストが実際に払われているか。沈黙こそが信号。"""
+    r.section("手入れの比率（intentions-log の最終記入からの日数）")
+    rows: list[tuple[int, str, str]] = []
+    missing: list[str] = []
+    for d in domain_dirs():
+        readme = d / "README.md"
+        if readme.is_file() and "**Status: dormant**" in readme.read_text(encoding="utf-8", errors="ignore"):
+            continue  # README に「**Status: dormant**」＝意図して止めている。静かなのは計画どおりで、兆候ではない
+        last = _last_log_date(d)
+        if last is None:
+            missing.append(d.name)
+            continue
+        rows.append(((today - last).days, d.name, last.isoformat()))
+    rows.sort(reverse=True)
+    for age, name, last in rows:
+        mark = f"{RED}✗{RESET}" if age > 60 else (f"{YEL}!{RESET}" if age > 30 else f"{GRN}✓{RESET}")
+        if age > 60:
+            r.findings += 1
+        r.row(f"  {mark} {age:>4}d  {name:<22} last {last}")
+    for name in missing:
+        r.warn(f"intentions-log.md がありません: {name}")
+    if not rows and not missing:
+        r.ok("まだドメインがありません（`add-domain` で最初の1つを作ってください）")
+    if rows:
+        cold = sum(1 for age, _, _ in rows if age > 60)
+        r.info(f"{len(rows)} ドメイン中 {cold} が冷えています（60日超）。冷えは「儀式を足せ」ではなく「畳むか作り直せ」の信号です。")
+
+
+# ---------------------------------------------------------------- 健康状態
+# `self-diagnose` の「数えられる半分」。各検査はデータを返す純粋な関数なので、
+# 同じ数字がこのレポートにも、ブリーフの1行ナッジ（`health_summary`）にも流れる。
+# 件数ではなく閾値で出す。何も悪くないのに鳴るナッジは、読み飛ばす癖を育てる。
+
+DECISION_STALE = 7      # ⚠要判断 が「止まっている」と数えられるまでの日数
+FLOW_RATIO = 2          # 7日で 追加 ≥ この倍 × 完了 なら、減るより速く増えている
+FLOW_MIN = 5            # 追加がこれ未満なら比率はただの雑音
+SKILL_WINDOW = 90       # スキルの呼び出しを数える履歴の日数
+SKILL_WINDOW_MIN = 21   # 履歴がこれより短いと「未使用」は何も意味しない
+ADDED = re.compile(r"追加\s*(20\d{2}-\d{2}-\d{2})")
+_MENU = None
+
+
+def menu():
+    """bin/menu をモジュールとして読む。backlog の解釈と索引の重さの出所を
+    1つにするため。遅延ロード: ダッシュ検査のフック経路にこのコストを払わせない。"""
+    global _MENU
+    if _MENU is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        loader = SourceFileLoader("ai_menu", str(ROOT / "bin" / "menu"))
+        spec = importlib.util.spec_from_loader("ai_menu", loader)
+        _MENU = importlib.util.module_from_spec(spec)
+        loader.exec_module(_MENU)
+    return _MENU
+
+
+def backlog_files() -> list[tuple[Path, str]]:
+    out = [(d / "backlog.md", d.name) for d in domain_dirs()
+           if (d / "backlog.md").is_file()]
+    if (ROOT / "tasks" / "backlog.md").is_file():
+        out.append((ROOT / "tasks" / "backlog.md", "横断"))
+    return out
+
+
+def backlog_health(today: date) -> dict:
+    """期限切れと、日付の読めない ⏰ は menu のパーサから取る（ブリーフ自身の読み方）。
+    止まった判断と、起動条件の無い 💤 はブリーフが読み飛ばす節にあるので、ここで読む。"""
+    items = menu().all_items()
+    h = {
+        "overdue": [(i["domain"], i["title"]) for i in items if i["due"] and i["due"] < today],
+        "undated": [(i["domain"], i["title"]) for i in items if i["dated"] and i["due"] is None],
+        "stuck": [], "untriggered": [],
+    }
+    for path, domain in backlog_files():
+        section, cur = "", None
+        blocks: list[tuple[str, list[str]]] = []
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("## "):
+                section, cur = line[3:].strip(), None
+            elif re.match(r"-\s*\[[ ~]\]", line):
+                cur = [line]
+                blocks.append((section, cur))
+            elif line.startswith("- ") or not line.strip():
+                cur = None
+            elif cur is not None:
+                cur.append(line.strip())
+        for sec, body in blocks:
+            if sec.startswith(("完了", "Done")):
+                continue
+            text = " ".join(body)
+            title = menu().title_of(body[0].split("]", 1)[1])
+            if sec.startswith("💤"):
+                if "起動条件" not in text and "trigger" not in text.lower():
+                    h["untriggered"].append((domain, title))
+            elif "⚠要判断" in text:
+                m = ADDED.search(text) or re.search(r"20\d{2}-\d{2}-\d{2}", text)
+                added = m and datetime.strptime(m.group(1) if m.groups() else m.group(0), "%Y-%m-%d").date()
+                if added and (today - added).days > DECISION_STALE:
+                    h["stuck"].append((domain, title, (today - added).days))
+    return h
+
+
+def heavy_indexes() -> list[tuple[str, int]]:
+    m = menu()
+    out = []
+    for d in sorted(DOMAINS.iterdir()) if DOMAINS.is_dir() else []:
+        if not m.is_domain_dir(d):
+            continue
+        for dom in [d, *m.child_domains(d)]:
+            t = m.file_tokens(dom / "index.md")
+            if t >= m.RED_AT:
+                out.append((rel(dom).replace("knowledge/domains/", ""), t))
+    return out
+
+
+def claude_project_dir() -> Path:
+    """Claude Code がこのリポジトリ用に使うフォルダ（会話履歴と自動メモリ）。
+    **本体のチェックアウト**のパスで決まるので、worktree からでも同じ場所になる。"""
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    repo = Path(common).parent if common else ROOT
+    return Path.home() / ".claude" / "projects" / str(repo).replace("/", "-")
+
+
+def skill_usage(today: date) -> tuple[list[str], int]:
+    """この端末の会話履歴で一度も呼ばれていないスキル。(未使用, 実際に見えた履歴の日数)
+    を返す。数えるのは Skill ツールの呼び出しと、打ち込まれた /コマンドだけ。
+    呼ばずに手で手順をなぞったスキルは未使用に見える。助言であって証明ではない。
+    履歴はこの端末のもので、Claude Code の分しか無い。
+
+    Claude Code は約30日で履歴を消すので、読み取りキャッシュを台帳として使う。
+    ファイルが消えても記録は残り、表示する日数は台帳が実際に届く長さになる。"""
+    tdir = claude_project_dir()
+    skills = sorted(p.parent.name for p in (ROOT / ".claude" / "skills").glob("*/SKILL.md"))
+    cutoff = datetime.now().timestamp() - SKILL_WINDOW * 86400
+    files = [f for f in tdir.glob("*.jsonl") if f.stat().st_mtime >= cutoff] if tdir.is_dir() else []
+    # 履歴は追記専用なので、ファイルごとの結果を更新時刻でキャッシュし、
+    # 変わったファイルだけを読み直す。
+    import json
+    cache_path = ROOT / ".session" / "cache" / "skill-scan.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    stale = [f for f in files if cache.get(f.name, [None])[0] != f.stat().st_mtime]
+    if stale:
+        try:
+            out = subprocess.run(
+                ["grep", "-oE", r'"skill": ?"[a-z0-9-]+"|<command-name>/[a-z0-9-]+</command-name>',
+                 "/dev/null", *map(str, stale)],
+                capture_output=True, text=True, timeout=60,
+            ).stdout
+        except (subprocess.SubprocessError, OSError):
+            return [], 0
+        found: dict[str, set] = {f.name: set() for f in stale}
+        for line in out.splitlines():
+            path, _, hit = line.partition(":")
+            m = re.search(r'"skill": ?"([a-z0-9-]+)"|<command-name>/([a-z0-9-]+)<', hit)
+            if m:
+                found.setdefault(Path(path).name, set()).add(m.group(1) or m.group(2))
+        for f in stale:
+            cache[f.name] = [f.stat().st_mtime, sorted(found.get(f.name, ()))]
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache), encoding="utf-8")
+        except OSError:
+            pass
+    # 捨てるのは期間から外れたものだけ。消されただけのファイルの記録は残す。
+    ledger = {k: v for k, v in cache.items() if v and v[0] and v[0] >= cutoff}
+    if len(ledger) != len(cache):
+        try:
+            cache_path.write_text(json.dumps(ledger), encoding="utf-8")
+        except OSError:
+            pass
+    if not ledger:
+        return [], 0
+    window = min(SKILL_WINDOW, (today - date.fromtimestamp(min(v[0] for v in ledger.values()))).days)
+    used = {s for v in ledger.values() for s in v[1]}
+    return [s for s in skills if s not in used], window
+
+
+def health_summary(today: date) -> list[str]:
+    """ブリーフのナッジを短い断片で返す。健康なら空。期限切れは入れない
+    （今日の欄にもう出ている）。"""
+    parts = []
+    h = backlog_health(today)
+    if h["stuck"]:
+        parts.append(f"{DECISION_STALE}日超え待ちの判断 {len(h['stuck'])}件")
+    added, done = menu().flow(today)
+    if added >= FLOW_MIN and added >= FLOW_RATIO * max(done, 1):
+        parts.append(f"今週の backlog +{added}/−{done}")
+    heavy = heavy_indexes()
+    if heavy:
+        parts.append(f"重い索引 {len(heavy)}本")
+    unused, window = skill_usage(today)
+    if unused and window >= SKILL_WINDOW_MIN:
+        parts.append(f"{window}日間未使用のスキル {len(unused)}個")
+    if h["untriggered"]:
+        parts.append(f"起動条件の無い 💤 {len(h['untriggered'])}件")
+    if STATE.exists():
+        expired = [m for m in UNTIL.finditer(STATE.read_text(encoding="utf-8"))
+                   if datetime.strptime(m.group(1) or m.group(2), "%Y-%m-%d").date() < today]
+        if expired:
+            parts.append(f"期限切れの優先事項 {len(expired)}件")
+    if MEMORY_DIR.is_dir():
+        facts = sum(1 for p in MEMORY_DIR.glob("*.md")
+                    if re.search(rf"^\s*type:\s*({'|'.join(FACT_TYPES)})\b", p.read_text(encoding="utf-8"), re.M))
+        if facts:
+            parts.append(f"事実が入ったメモリ {facts}本")
+    return parts
+
+
+def check_backlog_health(r: Report, today: date) -> None:
+    r.section("backlog の健康")
+    h = backlog_health(today)
+    for dom, title in h["overdue"]:
+        r.warn(f"期限切れ: {title}  （{dom}）")
+    for dom, title in h["undated"]:
+        r.warn(f"日付の読めない ⏰（ブリーフに出ない）: {title}  （{dom}）")
+    for dom, title, age in h["stuck"]:
+        r.warn(f"⚠要判断 が {age}日待ち: {title}  （{dom}）")
+    for dom, title in h["untriggered"]:
+        r.warn(f"起動条件の無い 💤（ただの未着手）: {title}  （{dom}）")
+    if not any(h.values()):
+        r.ok("期限切れなし、止まった判断なし、💤 はすべて起動条件つき")
+
+
+def check_index_weight(r: Report) -> None:
+    r.section("索引の重さ（ドメインに入るたびに読まれる）")
+    heavy = heavy_indexes()
+    for dom, t in heavy:
+        r.warn(f"{dom}/index.md が約 {t // 1000}k トークン（{menu().RED_AT // 1000}k で赤）。統合するか分割を。")
+    if not heavy:
+        r.ok("赤の索引はありません")
+
+
+MEMORY_DIR = ROOT / "memory"
+FACT_TYPES = ("project", "reference")   # 定義上「事実」であるメモリの種類
+
+
+def check_memory(r: Report) -> None:
+    """メモリ層の機械でできる半分: コピーは1つ（シンボリックリンク）、索引の
+    リンクが解決すること、種類が「事実」のメモリが無いこと（メモリは好みだけ）。
+
+    リポジトリに `memory/` を置くのは任意。無ければ何もしない。置いた場合だけ、
+    Claude Code の自動メモリがそこへのリンクになっているかを確かめる。"""
+    r.section("メモリ層（memory/ は好みだけ）")
+    if not MEMORY_DIR.is_dir():
+        r.info("このチェックアウトに memory/ はありません。省略しました")
+        return
+    cm = claude_project_dir() / "memory"
+    if not cm.is_symlink():
+        r.warn(f"{cm} が memory/ へのシンボリックリンクではありません。コピーが2つになり、ずれていきます")
+    elif cm.resolve() != MEMORY_DIR.resolve():
+        r.info(f"自動メモリのリンク先は {cm.resolve()}（本体のチェックアウト）で、この worktree ではありません")
+    files = sorted(p for p in MEMORY_DIR.glob("*.md") if p.name != "MEMORY.md")
+    index = (MEMORY_DIR / "MEMORY.md").read_text(encoding="utf-8") if (MEMORY_DIR / "MEMORY.md").exists() else ""
+    linked = set(re.findall(r"\]\(([^)]+\.md)\)", index))
+    for name in sorted(linked - {p.name for p in files}):
+        r.fail(f"MEMORY.md が存在しないファイルを指しています: {name}")
+    for p in files:
+        if p.name not in linked:
+            r.warn(f"MEMORY.md に載っていないメモリ（一度も読まれない）: {p.name}")
+        m = re.search(r"^\s*type:\s*(\w+)", p.read_text(encoding="utf-8"), re.M)
+        if m and m.group(1) in FACT_TYPES:
+            r.warn(f"{p.name} は {m.group(1)} メモリ: 事実なので knowledge/ に置く（メモリは好みだけ）")
+    r.ok(f"{len(files)} 本のメモリを確認しました")
+
+
+def check_skill_usage(r: Report, today: date) -> None:
+    r.section("スキルの使用状況（この端末の Claude Code 会話履歴）")
+    unused, window = skill_usage(today)
+    if window < SKILL_WINDOW_MIN:
+        r.info(f"履歴が {window}日分しか無く、判断するには足りません")
+    elif unused:
+        r.warn(f"{window}日間一度も呼ばれていない: {', '.join(unused)}。畳む、統合する、起動語を見直す？（助言であって証明ではない）")
+    else:
+        r.ok(f"すべてのスキルが {window}日の間に1回以上呼ばれています")
+
+
+def check_git_hygiene(r: Report) -> None:
+    r.section("Git の衛生")
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    dirty = [l for l in git("status", "--porcelain").splitlines() if l.strip()]
+    if dirty:
+        r.warn(f"{branch} に未コミットの変更が {len(dirty)} 件")
+        for line in dirty[:8]:
+            r.info(line)
+    else:
+        r.ok(f"{branch}、作業ツリーはきれいです")
+
+    merged = [
+        b.strip().lstrip("* ").strip()
+        for b in git("branch", "--merged", "main").splitlines()
+        if b.strip().lstrip("* ").strip() not in ("main", "")
+    ]
+    if merged:
+        r.warn(f"main にマージ済みのローカルブランチ: {', '.join(merged)}")
+    else:
+        r.ok("取り残されたブランチはありません")
+
+    if git("rev-parse", "--verify", "--quiet", "origin/main"):
+        counts = git("rev-list", "--left-right", "--count", "origin/main...HEAD")
+        if counts:
+            behind, ahead = (counts.split() + ["0", "0"])[:2]
+            if int(ahead):
+                r.warn(f"未 push のコミットが {ahead} 件（セッション終わりにローカルだけの仕事を残さない）")
+            if int(behind):
+                r.info(f"origin/main より {behind} コミット遅れています")
+            if not int(ahead) and not int(behind):
+                r.ok("origin/main と同期しています")
+    else:
+        r.info("origin/main が見えません（オフライン？）。進み遅れの確認は省略しました")
+
+
+def main() -> int:
+    args = set(sys.argv[1:])
+    branch_mode = "--branch" in args
+    emdash_only = "--emdash-only" in args
+    diff_mode = "--diff" in args or branch_mode or emdash_only
+    quiet = "--quiet" in args or emdash_only
+    today = date.today()
+
+    r = Report(quiet=quiet)
+
+    if "--health" in args:
+        # ブリーフ用の1行（bin/menu が1日キャッシュする）。
+        print("、".join(health_summary(today)))
+        return 0
+
+    if emdash_only:
+        # PostToolUse フック用の高速経路。glob も git branch も呼ばない。
+        check_em_dashes(r, [], enforcing=True)
+        return 1 if r.findings else 0
+
+    scope = changed_markdown(whole_branch=branch_mode) if diff_mode else tracked_markdown()
+    label = "ブランチ vs origin/main" if branch_mode else ("未コミットの編集" if diff_mode else "全体")
+    print(f"{BOLD}lint{RESET} {DIM}（{label}／Markdown {len(scope)} 本／{today}）{RESET}")
+
+    check_em_dashes(r, scope, enforcing=diff_mode)
+    check_note_frontmatter(r, scope)
+    check_wikilinks(r, scope)
+    if not diff_mode:
+        check_domain_registration(r)
+        check_state_freshness(r, today)
+        check_state_shape(r, today)
+        check_maintenance_ratio(r, today)
+        check_backlog_health(r, today)
+        check_index_weight(r)
+        check_skill_usage(r, today)
+        check_memory(r)
+        check_git_hygiene(r)
+
+    print()
+    if r.findings:
+        print(f"{RED}{r.findings} 件の指摘。{RESET} 判断してください。真実の置き場を自動修正しないこと。")
+    else:
+        print(f"{GRN}問題なし。{RESET}")
+    return 1 if r.findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

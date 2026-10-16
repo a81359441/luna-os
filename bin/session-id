@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""このセッションのidを出す。`.session/domain-<id>` の <id> の部分。
+
+ハーネスごとに置き場所が違う:
+  Claude Code  … CLAUDE_CODE_SESSION_ID をエージェント環境に出す
+  Codex        … CODEX_SESSION_ID をエージェント環境に出す
+  Grok Build   … GROK_SESSION_ID をフックにしか渡さないので、SessionStart が
+                 `.session/grok-session-id` に書き出し、エージェントはそれを読む
+
+idが分からないときは**何も出さずに終了する**（exit 0）。呼ぶ側は
+`unknown` のような代用値をでっち上げず、マーカーの書き込みを**やめること**。
+存在しないセッションの印が残るほうが、印が無いより害が大きい。
+
+使い方:
+  bin/session-id
+  printf '<domain>\\n<topic>\\n' > ".session/domain-$(bin/session-id)"
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+def session_id() -> str:
+    sid = (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CODEX_SESSION_ID")
+        or os.environ.get("GROK_SESSION_ID")
+        or ""
+    )
+    sid = sid.strip()
+    if sid:
+        return sid
+    root = Path(
+        os.environ.get("CLAUDE_PROJECT_DIR")
+        or os.environ.get("GROK_WORKSPACE_ROOT")
+        or Path.cwd()
+    )
+    pointer = root / ".session" / "grok-session-id"
+    try:
+        return pointer.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def main() -> None:
+    sid = session_id()
+    if sid:
+        print(sid)
+
+
+if __name__ == "__main__":
+    main()

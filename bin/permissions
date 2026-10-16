@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""AIが「実行してよいか」を聞かずに進める範囲を、日本語で見せる・整える。
+
+  bin/permissions          いまの設定を、ふつうの言葉で一覧にする
+  bin/permissions --apply  おすすめの設定（.claude/permissions-preset.json）を
+                           .claude/settings.local.json に足す。本人が同意してから。
+
+足すだけで、消さない。既にある許可はそのまま残る。settings.local.json は
+この Mac だけの個人設定で、git には入らない。
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+PRESET = ROOT / ".claude" / "permissions-preset.json"
+LOCAL = ROOT / ".claude" / "settings.local.json"
+SCOPES = [
+    (Path.home() / ".claude" / "settings.json", "この Mac 全体"),
+    (ROOT / ".claude" / "settings.json", "このフォルダ（共有）"),
+    (LOCAL, "このフォルダ（あなた専用）"),
+]
+MODES = {
+    "default": "ふつう（許可リストに無いものは毎回聞く）",
+    "acceptEdits": "ファイルの編集は聞かない",
+    "auto": "おまかせ（危なそうなものだけ止める）",
+    "plan": "計画だけ（実行しない）",
+    "bypassPermissions": "何も聞かない（危険）",
+}
+
+
+def load(p: Path) -> dict:
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def show() -> None:
+    for path, label in SCOPES:
+        perm = load(path).get("permissions", {})
+        print(f"■ {label}  {path.name}")
+        if not perm:
+            print("    （設定なし）\n")
+            continue
+        if "defaultMode" in perm:
+            m = perm["defaultMode"]
+            print(f"    モード: {MODES.get(m, m)}")
+        for key, word in (("allow", "聞かずにやる"), ("deny", "絶対にやらない"), ("ask", "必ず聞く")):
+            rules = perm.get(key) or []
+            if rules:
+                print(f"    {word}（{len(rules)}）: " + "、".join(rules))
+        print()
+
+
+def apply() -> None:
+    preset = load(PRESET)
+    if not preset:
+        sys.exit(f"おすすめの設定が見つかりません: {PRESET}")
+    data = load(LOCAL)
+    perm = data.setdefault("permissions", {})
+    added = 0
+    for key in ("allow", "deny"):
+        cur = perm.setdefault(key, [])
+        for r in preset.get(key, []):
+            if r not in cur:
+                cur.append(r)
+                added += 1
+    LOCAL.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"おすすめの設定を入れました（{added}件追加）。次の起動から効きます。")
+
+
+if __name__ == "__main__":
+    apply() if "--apply" in sys.argv[1:] else show()

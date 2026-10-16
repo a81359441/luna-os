@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# 初回セットアップの機械的な部分を1回で済ませる。setup スキルから呼ぶ。
+#
+#   bin/init <AIの名前> <コマンド名>
+#   例: bin/init ルナ luna
+#
+# 1. リポジトリ中の名前のプレースホルダを、決めた名前に置き換える
+# 2. ~/.local/bin/<コマンド名> を作り、名前を打てば開くようにする
+# 3. git の名前とメールが未設定なら、GitHub のアカウントから入れる
+#
+# 1本のスクリプトにまとめているのは、初めての人に英語の「実行してよいか」を
+# 何度も見せないため（.claude/settings.json で、これだけを許可してある）。
+set -eu
+# 日本語の名前を sed に通すため。ロケール未設定のシェルでは「illegal byte sequence」で止まる
+export LC_ALL=C
+
+NAME="${1:-}"
+CMD="${2:-}"
+if [ -z "$NAME" ] || [ -z "$CMD" ]; then
+  echo "使い方: bin/init <AIの名前> <コマンド名>" >&2
+  exit 2
+fi
+case "$CMD" in
+  *[!a-z0-9-]*|-*) echo "コマンド名は英小文字・数字・ハイフンだけにしてください: $CMD" >&2; exit 2 ;;
+esac
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+# このファイル自身の置き換えで壊れないよう、プレースホルダは分けて組み立てる
+PH="{{""AI_NAME""}}"
+
+# 2. コマンド名の衝突を先に確かめる（何も書き換える前に止まれるように）
+LINK="$HOME/.local/bin/$CMD"
+if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$ROOT/bin/start" ]; then
+  :
+elif [ -e "$LINK" ] || command -v "$CMD" >/dev/null 2>&1; then
+  echo "TAKEN: '$CMD' は、この Mac で既に使われています。別のコマンド名にしてください。" >&2
+  exit 3
+fi
+
+# 1. 名前の置き換え
+files=$(grep -rl "$PH" . --exclude-dir=.git --exclude-dir=site \
+  | grep -v -e 'skills/setup/SKILL.md' -e '^./bin/init$' || true)
+if [ -n "$files" ]; then
+  # sed の置換文字列で特別な意味を持つ & / \ を逃がす
+  esc=$(printf '%s' "$NAME" | sed -e 's/[\/&\\]/\\&/g')
+  echo "$files" | while IFS= read -r f; do
+    sed -i '' "s/$PH/$esc/g" "$f"
+  done
+fi
+echo "名前: $NAME（$(echo "$files" | grep -c . ) ファイル）"
+
+# 2. 呼び出しコマンド
+mkdir -p "$HOME/.local/bin"
+ln -sf "$ROOT/bin/start" "$LINK"
+if ! printf '%s' ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
+  if ! grep -qs '.local/bin' "$HOME/.zshrc"; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+  fi
+fi
+echo "呼び出し: $CMD"
+
+# 3. git の名前とメール（コミットに要る。新しい Mac では空のことが多い）
+if [ -z "$(git config --global user.email || true)" ]; then
+  if login=$(gh api user --jq .login 2>/dev/null) && id=$(gh api user --jq .id 2>/dev/null); then
+    git config --global user.name "$login"
+    git config --global user.email "${id}+${login}@users.noreply.github.com"
+    echo "git: $login として設定"
+  else
+    echo "git: 名前とメールが未設定です（gh にログインしていません）" >&2
+  fi
+else
+  echo "git: 設定済み"
+fi

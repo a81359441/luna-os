@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# どのディレクトリからでも、このAI OSのリポジトリでセッションを開く。
+#
+# 一度だけインストール:
+#   ln -s "$HOME/path/to/this-repo/bin/start" "$HOME/.local/bin/<AIの名前>"
+# 呼び出し元のシェルのカレントディレクトリは動かない（cd はこのプロセスの中だけ）。
+#
+# なぜメニューを「開始プロンプト」として渡し、ここで echo しないのか:
+# Claude Code は端末の代替画面を占有するので、exec の前に出力したものは
+# セッション中ずっと隠れ、終了時にやっと出てくる。SessionStart フックの
+# 標準出力も、TUI が1行に畳む「コンテキスト添付」として届くだけ。
+# 人間が確実に読めるのは Claude の UI の中、AIの最初の発言だけ。
+# だからここでは短い開始プロンプトを渡す。フック自体は走っているので、
+# メニューは既にAIの文脈に入っている。ファイル読み込みは一切発生しない。
+#
+#   start              挨拶 + スタートメニュー、そのあと入力待ち
+#   start -c           引数やフラグはそのまま素通し（挨拶なし）
+#   NO_GREET=1 start   素のセッション。開始プロンプトを渡さない
+set -u
+# シンボリックリンク経由で呼ばれても、リンク先の本物の場所からリポジトリを割り出す。
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+AI_HOME="${AI_HOME:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+
+if [ ! -d "$AI_HOME" ]; then
+  echo "start: $AI_HOME が見つかりません（AI_HOME で上書きできます）" >&2
+  exit 1
+fi
+cd "$AI_HOME" || exit 1
+
+OPEN="セッション開始。一行で挨拶して、そのあと文脈にあるスタートメニューを\
+そのまま再現してください。まだ何も読み込まないこと: state.md もドメインの\
+ファイルもツール呼び出しも不要です。私の選択を待ってください。"
+
+if [ "$#" -eq 0 ] && [ -z "${NO_GREET:-}" ]; then
+  exec claude "${OPEN_PROMPT:-$OPEN}"
+fi
+exec claude "$@"

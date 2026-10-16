@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""スキル一覧：どんな動詞があるか、日本語と英語の両方で。
+
+Claude Code はスキルの `name` を ^[a-z0-9]+(-[a-z0-9]+)*$ で検証するので、
+起動キーは ASCII でなければならない。これは好みではなくハーネスの制約。
+そこで日本語名は二層目として、各スキル自身の `description` 末尾に
+`日本語：「名前」「別名」…` の形で持たせる。モデルが「深掘り」で発火する
+根拠であり、同時にこのスクリプトが読む表示名でもある。真実は一箇所、
+ずれようがない。
+
+このファイルが持つのは見た目だけ：どのスキルがどのグループか（これが
+番号を固定する）と、一行の日本語説明。GROUPS に無いスキルも「その他」に
+出るので、追加したのに見えない事故は起きない。
+
+使い方:
+  bin/skills            一覧
+  bin/skills <番号>     その番号の詳細
+  bin/skills <名前>     名前で詳細（日本語・英語どちらでも）
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parent.parent)
+SKILLS = ROOT / ".claude" / "skills"
+
+RESET = "\033[0m"
+GOLD = "\033[38;2;230;185;70m"
+DIM = "\033[38;2;140;140;140m"
+BOLD = "\033[1m"
+
+# グループの並びが番号を固定する。最近使ったかどうかでは動かない。
+GROUPS = [
+    ("日々の動詞", ["log", "agenda", "grill", "distill", "build", "closeout"]),
+    ("振り返り",   ["history", "self-diagnose"]),
+    ("作る",       ["deck", "jp-email"]),
+    ("構造",       ["add-domain", "setup"]),
+]
+
+# 表示用の短縮。本当の中身はスキル自身の description。
+GLOSS = {
+    "log":           "その日あったことを日記として残す",
+    "agenda":        "今日の予定を読む・直す",
+    "grill":         "頭の中の知識を質問攻めで引き出す",
+    "distill":       "外部ソースを蒸留して research へ",
+    "build":         "PRD → 承認 → 構築 → 検証",
+    "closeout":      "締めの唯一の動詞。完了なら着地と掃除、途中なら保存して /clear 後に続きから",
+    "history":       "過去セッションの履歴と、開き直し方",
+    "jp-email":      "日本語ビジネスメールを本人の文体で下書き",
+    "self-diagnose": "lint の数字を読み、5つの判断で健康診断",
+    "deck":          "中身を固めてから作るHTMLスライド",
+    "add-domain":    "新ドメインを作って台帳に登録",
+    "setup":         "初回セットアップ（名前・最初のドメイン）",
+}
+
+JA_CLAUSE = re.compile(r"日本語[:：]\s*((?:\s*「[^」]+」)+)\s*(?:でも起動)?[。.]?")
+BRACKETED = re.compile(r"「([^」]+)」")
+
+
+def color(on: bool):
+    return (lambda s, c: f"{c}{s}{RESET}") if on else (lambda s, c: s)
+
+
+def dwidth(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def trunc(s: str, width: int) -> str:
+    if dwidth(s) <= width:
+        return s
+    out, used = "", 0
+    for ch in s:
+        w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used + w > width - 1:
+            break
+        out += ch
+        used += w
+    return out + "…"
+
+
+def pad(s: str, width: int) -> str:
+    return s + " " * max(0, width - dwidth(s))
+
+
+def wrap(text: str, width: int) -> list[str]:
+    """Wrap on spaces where they exist, on width where they do not (Japanese)."""
+    lines, cur, used = [], "", 0
+    for token in re.findall(r"\S+\s*|\s+", text):
+        w = dwidth(token)
+        if used + w > width and cur:
+            lines.append(cur.rstrip())
+            cur, used = "", 0
+        while w > width:                      # a single unbroken CJK run
+            take, tw = "", 0
+            for ch in token:
+                cw = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+                if tw + cw > width:
+                    break
+                take, tw = take + ch, tw + cw
+            lines.append(take)
+            token = token[len(take):]
+            w = dwidth(token)
+        cur, used = cur + token, used + w
+    if cur.strip():
+        lines.append(cur.rstrip())
+    return lines or [""]
+
+
+def frontmatter(path: Path) -> dict:
+    """Minimal YAML: the keys we need are flat scalars, possibly folded."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    _, _, rest = text.partition("---")
+    body, _, _ = rest.partition("\n---")
+    out, key = {}, None
+    for line in body.splitlines():
+        m = re.match(r"^([A-Za-z][\w-]*):\s*(.*)$", line)
+        if m:
+            key = m.group(1)
+            out[key] = m.group(2).strip()
+        elif key and line.strip():
+            out[key] = (out[key] + " " + line.strip()).strip()
+    return out
+
+
+def scan() -> dict:
+    rows = {}
+    if not SKILLS.is_dir():
+        return rows
+    for d in sorted(SKILLS.iterdir()):
+        f = d / "SKILL.md"
+        if not f.is_file():
+            continue
+        fm = frontmatter(f)
+        slug = fm.get("name") or d.name
+        desc = fm.get("description", "")
+        m = JA_CLAUSE.search(desc)
+        names = BRACKETED.findall(m.group(1)) if m else []
+        rows[slug] = {
+            "slug": slug,
+            "path": f,
+            "desc": desc,
+            "en_desc": JA_CLAUSE.sub("", desc).strip().rstrip("。").strip(),
+            "ja": names[0] if names else "",
+            "aliases": names[1:],
+        }
+    return rows
+
+
+def ordered(rows: dict):
+    """Groups in declared order, then anything unclaimed under その他."""
+    out, placed = [], set()
+    for label, slugs in GROUPS:
+        bucket = [rows[s] for s in slugs if s in rows]
+        placed.update(r["slug"] for r in bucket)
+        if bucket:
+            out.append((label, bucket))
+    rest = [r for s, r in sorted(rows.items()) if s not in placed]
+    if rest:
+        out.append(("その他", rest))
+    return out
+
+
+def headings(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    _, _, body = text.partition("\n---")
+    return [
+        re.sub(r"^#+\s+", "", ln).strip()
+        for ln in body.splitlines()
+        if re.match(r"^#{2}\s+\S", ln)
+    ]
+
+
+def detail(row: dict, n: int, c) -> None:
+    ja = row["ja"] or row["slug"]
+    print()
+    print(c(f"  {n}. {ja}", GOLD + BOLD) + c(f"  ·  {row['slug']}", DIM))
+    print()
+    gl = GLOSS.get(row["slug"])
+    if gl:
+        print(f"  {gl}")
+        print()
+    calls = [row["ja"]] + row["aliases"] if row["ja"] else []
+    if calls:
+        print(c("  呼び方:", DIM) + "  " + "  ".join(f"「{a}」" for a in calls)
+              + c(f"  /  {row['slug']}", DIM))
+        print()
+    if row["en_desc"]:
+        print(c("  なにをするか:", DIM))
+        for ln in wrap(row["en_desc"], 74):
+            print(f"  {ln}")
+        print()
+    hs = headings(row["path"])
+    if hs:
+        print(c("  中身:", DIM))
+        for h in hs[:9]:
+            print(c(f"    · {trunc(h, 70)}", DIM))
+        if len(hs) > 9:
+            print(c(f"    · ほか {len(hs) - 9}", DIM))
+        print()
+    print(c(f"  {row['path'].relative_to(ROOT)}", DIM))
+    print()
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    c = color(sys.stdout.isatty() and "--no-color" not in argv)
+    args = [a for a in argv if not a.startswith("--")]
+
+    rows = scan()
+    if not rows:
+        print("\n  .claude/skills にスキルが見つかりません。\n")
+        return
+
+    groups = ordered(rows)
+    flat = [r for _, bucket in groups for r in bucket]
+
+    if args:
+        q = args[0]
+        pick = None
+        if q.isdigit():
+            n = int(q)
+            if not 1 <= n <= len(flat):
+                print(f"\n  {n} 番はありません。全部で {len(flat)} 個です。\n")
+                return
+            pick = flat[n - 1]
+        else:
+            low = q.lower()
+            for r in flat:
+                if low == r["slug"].lower() or q in ([r["ja"]] + r["aliases"]):
+                    pick = r
+                    break
+            if pick is None:                      # partial match, then give up
+                hits = [r for r in flat
+                        if low in r["slug"].lower() or any(q in a for a in [r["ja"]] + r["aliases"])]
+                if len(hits) == 1:
+                    pick = hits[0]
+                elif hits:
+                    print(f"\n  「{q}」は複数あたります: "
+                          + "、".join(f"{r['ja'] or r['slug']}" for r in hits) + "\n")
+                    return
+                else:
+                    print(f"\n  「{q}」に当たるスキルがありません。\n")
+                    return
+        detail(pick, flat.index(pick) + 1, c)
+        return
+
+    print()
+    print(c("{{AI_NAME}} スキル一覧", GOLD + BOLD) + c(f"  ·  {len(flat)}", DIM))
+    print()
+    # 列幅はデータから決める。日本語名が長くても次の列を食い潰さないように。
+    jaw = max(dwidth(r["ja"] or r["slug"]) for r in flat) + 2
+    slugw = max(len(r["slug"]) for r in flat) + 2
+    n = 0
+    for label, bucket in groups:
+        print(c(f" {label}", DIM))
+        for r in bucket:
+            n += 1
+            print(f" {c(str(n).rjust(3), GOLD + BOLD)}  "
+                  f"{pad(r['ja'] or r['slug'], jaw)}"
+                  f"{c(pad(r['slug'], slugw), DIM)}"
+                  f"{trunc(GLOSS.get(r['slug'], ''), 44)}")
+        print()
+    print(c(" 番号で詳細 ·  skill <番号> / skill <名前> でも可", DIM))
+    print()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,1278 @@
+#!/usr/bin/env python3
+"""セッション開始時のブリーフ。今なにをすべきか。地図はキー1つ先に置く。
+
+SessionStart フックが描画する（決定的な処理。モデルのトークンは1つも使わない）。
+既定の表示は**ブリーフであって、目次ではない**: 今日（カレンダーと今日が期限の
+backlog）、今週の見通し、忘れずに（state.md の `## Now` と計算した声かけ）、最近の成果物。
+ドメインの一覧は `--domains` の裏に置いてある。開いた瞬間に「行き先が20個」
+並ぶメニューは、そのセッションが開かれた理由そのものを見失わせるから。
+
+重さは推定であってトークナイザではない（ASCII/4 + CJK*0.9）。
+「この索引は毎回読ませるには重すぎないか」に答えられれば十分。
+
+**番号は安定している。** ドメインの番号は LANES 上の位置から決まり、
+最近触ったかどうかでは動かない。だから「4」は、最近の一覧でも全体地図でも
+いつも同じドメインを指す。
+
+使い方:
+  bin/menu            ブリーフ（今日・今週・忘れずに・最近の成果物）
+  bin/menu --domains  最近動いたドメイン5件
+  bin/menu --backlog  開いている項目すべて。締切順（ブリーフの `b`）
+  bin/menu --all      全体地図。レーンごと
+  bin/menu --json     ブリーフをデータとして出す（端末以外の surface 用）
+  bin/menu --refresh  キャッシュを使わずカレンダーを取り直す
+  bin/menu --top N    最近の N 件
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import unicodedata
+from pathlib import Path
+
+ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parent.parent)
+DOMAINS = ROOT / "knowledge" / "domains"
+
+NAME = "{{AI_NAME}}"   # setup スキルが置き換える
+# 置き換えで一緒に書き換わらないよう、分けて組み立てる
+UNSET = NAME == "{{" + "AI_NAME" + "}}"
+ONBOARDING = ROOT / "tasks" / "onboarding.md"
+ICON = "🧠"
+
+AMBER_AT = 6_000   # index tokens
+RED_AT = 11_000
+
+# レーンの順序が**番号を固定する**。ここに無いドメインも「その他」に出るので、
+# フォルダを作ったのに見えない、という事故は起きない。
+#
+# 最初は空でよい。ドメインが5つを超えて「どこにあったか」を探し始めたら、
+# 自分の暮らしに合う名前のレーンに並べ替えること。レーンはカテゴリの正解では
+# なく、**同じ番号が毎回同じ場所を指す**ための台座。よくある形:
+#   ("仕事",   [...]), ("暮らし", [...]), ("発信", [...]), ("学び", [...])
+LANES: list[tuple[str, list[str]]] = [
+    # ("仕事", ["job-hunt"]),
+]
+
+# 取り込みの動詞。これらはドメインではない。仕事が属するドメインの**中へ**書く。
+# 「どこにあるか」の隣に「今なにをしているか」を並べるために出している。
+VERBS = ["log", "grill", "distill", "agenda", "build", "closeout"]
+# フッターに出す呼び名。打つのは日本語でよいので、日本語で見せる。
+VERBS_JA = {"log": "日誌", "grill": "深掘り", "distill": "抽出",
+            "agenda": "予定", "build": "構築", "closeout": "締め"}
+
+RESET = "\033[0m"
+GOLD = "\033[38;2;230;185;70m"
+DIM = "\033[38;2;140;140;140m"
+BOLD = "\033[1m"
+
+
+def color(on: bool):
+    return (lambda s, c: f"{c}{s}{RESET}") if on else (lambda s, c: s)
+
+
+def labels() -> dict:
+    """ステータスラインの表示名をそのまま借りる。2箇所に持つとずれるため。"""
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "statusline", ROOT / "bin" / "statusline.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return dict(mod.DOMAIN_LABELS)
+    except Exception:
+        return {}
+
+
+def est_tokens(text: str) -> int:
+    ascii_n = sum(1 for ch in text if ord(ch) < 128)
+    return int(ascii_n / 4 + (len(text) - ascii_n) * 0.9)
+
+
+def file_tokens(path: Path) -> int:
+    try:
+        return est_tokens(path.read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return 0
+
+
+def dwidth(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def trunc(s: str, width: int) -> str:
+    if dwidth(s) <= width:
+        return s
+    out, used = "", 0
+    for ch in s:
+        w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used + w > width - 1:
+            break
+        out += ch
+        used += w
+    return out + "…"
+
+
+def pad(s: str, width: int) -> str:
+    return s + " " * max(0, width - dwidth(s))
+
+
+def ago(day: dt.date | None) -> str:
+    if day is None:
+        return "?"
+    n = (dt.date.today() - day).days
+    if n <= 0:
+        return "今日"
+    if n == 1:
+        return "1日"
+    if n < 21:
+        return f"{n}日"
+    if n < 60:
+        return f"{n // 7}週"
+    return f"{n // 30}ヶ月"
+
+
+HEADING = re.compile(r"^#{2,3}\s+(\d{4}-\d{2}-\d{2})\s*(.*)$")
+TAGS = re.compile(r"\s*#(PERSONAL|CONTENT|COMMERCIAL|HYBRID)\b")
+LEAD = re.compile(r"^[\s:·・：—\-]*(\([^)]{0,8}\)|（[^）]{0,8}）)?[\s:·・：—\-]*")
+
+
+def clean(title: str) -> str:
+    return LEAD.sub("", TAGS.sub("", title)).strip()
+
+
+def is_domain_dir(p: Path) -> bool:
+    # `_` 始まりは雛形（`_template`）。索引を持っていてもドメインとして数えない。
+    return (p.is_dir() and not p.name.startswith(("_", "."))
+            and (p / "index.md").is_file())
+
+
+def child_domains(domain: Path) -> list[Path]:
+    """入れ子のサブドメイン。親の一部が自分の索引とログを持つまで育ったもの。"""
+    return sorted(c for c in domain.iterdir() if is_domain_dir(c))
+
+
+def last_entry(domain: Path, exclude: list[Path] | None = None):
+    """このドメイン自身のログにある、いちばん新しい日付見出し（子のものは除く）。"""
+    skip = [e.resolve() for e in (exclude or [])]
+    best = None
+    for log in sorted(domain.rglob("intentions-log.md")):
+        if any(str(log.resolve()).startswith(str(e) + "/") for e in skip):
+            continue
+        try:
+            lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = HEADING.match(line)
+            if not m:
+                continue
+            try:
+                day = dt.date.fromisoformat(m.group(1))
+            except ValueError:
+                continue
+            if best is None or day > best[0]:
+                best = (day, clean(m.group(2)))
+    return best
+
+
+_GIT_CACHE: dict | None = None
+
+
+DOMAIN_SPREAD = 3      # 1コミットでこれ以上のドメインに触れていたら「全体作業」であって仕事ではない
+
+
+def git_history() -> dict:
+    """ドメインごとの「最新の、そのドメインの仕事」を、ログ1回走査で拾う。
+
+    絞り込みが2つ。どちらもメニューが嘘をついた実例から来ている。
+
+    ① リポジトリ全体に及ぶコミット（改名、方針の適用）は多数のドメインを
+    同時に触るので、その件名はどのドメインの仕事の証拠にもならない。
+    DOMAIN_SPREAD を超える広がりを持つコミットは捨てる。閾値を1にすると
+    今度は**締め（closeout）が全部消える**。締めは1ドメインを compile しつつ
+    state などを一緒に更新するため。そのセッションで最も重要なコミットが、
+    構造的に絶対出てこなくなる。
+
+    ② backlog.md しか触っていないコミットは「キューの入れ替え」であって
+    そのドメインの仕事ではない。数えると、その日に本当に作ったものより
+    backlog の並べ替え3回が上に来る。
+
+    注意: ここでパスによる絞り込みを使ってはいけない。
+    `git log --name-only -- <dir>` はファイル一覧のほうも絞るので、
+    どのコミットも単一ドメインに見えてしまう。
+    """
+    global _GIT_CACHE
+    if _GIT_CACHE is not None:
+        return _GIT_CACHE
+    out = {}
+    try:
+        raw = subprocess.run(
+            ["git", "-C", str(ROOT), "log", "-n", "400", "--no-merges",
+             "--format=%x00%cs|%s", "--name-only"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+        for chunk in raw.split("\x00"):
+            if not chunk.strip():
+                continue
+            head, _, files = chunk.partition("\n")
+            day_s, _, subject = head.partition("|")
+            touched: dict[str, list[str]] = {}
+            for ln in files.splitlines():
+                parts = ln.split("/")
+                if ln.startswith("knowledge/domains/") and len(parts) > 3:
+                    touched.setdefault(parts[2], []).append(parts[-1])
+            if not touched or len(touched) > DOMAIN_SPREAD:
+                continue                 # 全体作業か、ドメイン外のコミット
+            try:
+                day = dt.date.fromisoformat(day_s.strip())
+            except ValueError:
+                continue
+            for slug, changed in touched.items():
+                if slug in out:          # もっと新しいものを既に持っている
+                    continue
+                if all(f == "backlog.md" for f in changed):
+                    continue             # キューの入れ替えであって仕事ではない
+                out[slug] = (day, subject.strip())
+    except Exception:
+        pass
+    _GIT_CACHE = out
+    return out
+
+
+def measure(domain: Path, exclude: list[Path]) -> tuple[int, int, tuple]:
+    """索引の重さ、フォルダ全体の重さ、索引以外でいちばん重いファイル。子は除く。"""
+    idx = domain / "index.md"
+    skip = [str(e.resolve()) + "/" for e in exclude]
+    total, heaviest = 0, ("", 0)
+    for f in domain.rglob("*.md"):
+        if any(str(f.resolve()).startswith(e) for e in skip):
+            continue
+        t = file_tokens(f)
+        total += t
+        if f != idx and t > heaviest[1]:
+            heaviest = (str(f.relative_to(domain)), t)
+    return file_tokens(idx), total, heaviest
+
+
+def row_for(domain: Path, parent: str | None = None) -> dict:
+    kids = child_domains(domain)
+    log = last_entry(domain, exclude=kids)
+    gday, gsubject = git_history().get(domain.name, (None, ""))
+    # 横断コミット（改名や方針の適用）はこのドメインの仕事ではないので、
+    # 日付にも説明にも使わない。そうしないと全体変更1つで全ドメインが
+    # 「今日触った」と主張し、最近順の一覧が意味を失う。
+    # 日付と説明は**同じ出来事から**取ること。以前は分かれていて、
+    # 日付は新しいほうを、説明は常にログを取っていたため、
+    # 「今日」と出しながら中身は2週間前の見出し、という表示になった。
+    log_day, log_note = (log[0], log[1]) if log else (None, "")
+    day = max([d for d in (log_day, gday) if d], default=None)
+    if gday and gsubject and (log_day is None or gday > log_day):
+        note = gsubject
+    elif log_note:
+        note = log_note
+        if log_day and day and (day - log_day).days > 7:
+            note = f"log {log_day:%-m/%-d}: {note}"
+    else:
+        note = gsubject
+    if not note:
+        note = "（触っただけ。締めなし）" if day else "（ログなし）"
+    idx_t, total, heaviest = measure(domain, kids)
+    return {
+        "slug": domain.name,
+        "parent": parent,
+        "day": day,
+        "note": note,
+        "idx": idx_t,
+        "total": total,
+        "heaviest": heaviest,
+        "backlog": open_items(domain / "backlog.md"),
+    }
+
+
+def scan() -> list[dict]:
+    rows = []
+    for domain in sorted(DOMAINS.iterdir()):
+        if not is_domain_dir(domain):
+            continue
+        rows.append(row_for(domain))
+        for kid in child_domains(domain):
+            rows.append(row_for(kid, parent=domain.name))
+    return rows
+
+
+def lane_order(rows: list[dict]) -> list[tuple[str, list[dict]]]:
+    """行をレーンに振り分ける。子は親のすぐ下に置く。"""
+    by_slug = {r["slug"]: r for r in rows}
+    kids_of: dict[str, list[dict]] = {}
+    for r in rows:
+        if r["parent"]:
+            kids_of.setdefault(r["parent"], []).append(r)
+    placed, lanes = set(), []
+    for lane, slugs in LANES:
+        bucket = []
+        for slug in slugs:
+            r = by_slug.get(slug)
+            if not r:
+                continue
+            bucket.append(r)
+            placed.add(slug)
+            for kid in kids_of.get(slug, []):
+                bucket.append(kid)
+                placed.add(kid["slug"])
+        if bucket:
+            lanes.append((lane, bucket))
+    leftover = [r for r in rows if r["slug"] not in placed]
+    if leftover:
+        lanes.append(("その他", leftover))
+    return lanes
+
+
+def numbering(lanes) -> dict:
+    """スラグごとの安定した番号。レーン上の位置から決まる。最近順には依存しない。"""
+    n, out = 0, {}
+    for _, bucket in lanes:
+        for r in bucket:
+            n += 1
+            out[r["slug"]] = n
+    return out
+
+
+def open_items(path: Path) -> int:
+    """backlog.md の中で開いている項目の数。
+
+    `## 💤 …` と `## 完了` **以外の**全節で `- [ ]` / `- [~]` を数える。
+    節の名前を列挙するのではなく**除外で**数えるので、ドメインが自分の
+    テーマ別の節（🚐 / 🩺 / 💰 のような）を勝手に足しても、
+    集計が黙って壊れることがない。
+    """
+    if not path.is_file():
+        return 0
+    n, skip = 0, False
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("## "):
+                # 見出しの**先頭**で判定する。部分一致では、
+                # 「未着手（Done になったら下へ）」という節が
+                # 中に Done を含むというだけで除外されてしまう。
+                h = line[3:].strip()
+                skip = h.startswith(("💤", "完了", "Done"))
+                continue
+            if not skip and re.match(r"\s*-\s*\[[ ~]\]", line):
+                n += 1
+    except OSError:
+        return 0
+    return n
+
+
+def flag(idx: int) -> str:
+    return "🔴" if idx >= RED_AT else ("🟡" if idx >= AMBER_AT else "🟢")
+
+
+def k(n: int) -> str:
+    return f"{round(n / 1000)}k" if n >= 1000 else f"{n}"
+
+
+def git_state():
+    try:
+        br = subprocess.run(["git", "-C", str(ROOT), "branch", "--show-current"],
+                            capture_output=True, text=True, timeout=5).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+        return br or "detached", "dirty" if dirty else "clean"
+    except Exception:
+        return "?", "?"
+
+
+def session_count() -> int:
+    """`h` が並べる過去セッションの数。安い処理: 読まずにファイル数を数えるだけ。"""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], capture_output=True, text=True, timeout=5).stdout.strip()
+        root = Path(out).parent if out else ROOT
+        d = Path.home() / ".claude" / "projects" / str(root).replace("/", "-")
+        return len(list(d.glob("*.jsonl"))) if d.is_dir() else 0
+    except Exception:
+        return 0
+
+
+def counts():
+    # `resume` = closeout の「続ける」出口で途中保存した仕事。`next:` を持つ [~] の項目。
+    # ただの [~] は「返事待ち」の意味でも使うので数えない。
+    cps = sum(1 for i in all_items() if i["state"] == "~" and i["next"])
+    backlog = open_items(ROOT / "tasks" / "backlog.md")
+    return cps, backlog
+
+
+# ---------------------------------------------------------------- ブリーフ
+
+CACHE = ROOT / ".session" / "cache"
+CAL_TTL = 3 * 3600      # 秒。セッションの開始が通信を待つことは絶対にあってはならない
+CAL_TIMEOUT = 12        # 秒。これを超えたらカレンダー無しでブリーフを描く
+OVERDUE_FOLD = 30       # 日。これより古い期限切れは1行に畳む
+
+# 持ち出し除外マーカー。既定は parity で、backlog に書いたものは
+# `--json` を読む surface（スマホへの通知など）にもそのまま出る。
+# 出したくない1行には項目のどこかに 🔒 を書く。端末では今まで通り
+# 全文が出て、外に出る surface だけが件数に畳む。**書く瞬間に付ける**
+# 方式なのは、private だと分かっている瞬間がそこしかないから。
+PRIVATE = "\U0001F512"
+
+# 「最近の成果物」の出どころ。アーティファクトはスクリプトから一覧できない
+# （ギャラリーはツールであって API ではない）ので、PostToolUse フック
+# （`.claude/hooks/artifact-log.sh`）が公開のたびにここへ1行足す。
+# この機械の中だけのもの。真実ではなく、リンクの控え。
+ARTIFACT_LOG = ROOT / ".session" / "artifacts.jsonl"
+# 開き直す価値のあるローカル HTML の置き場。許可リストであって、ホーム全体ではない。
+# デッキ置き場などをリポジトリの外に持っているなら、ここに足す。
+HTML_ROOTS = [ROOT / "knowledge"]
+RECENT_N = 4
+DIARY = DOMAINS / "diary" / "entries"
+DIARY_NUDGE = 7         # 日。日誌がこれだけ止まったらブリーフが声をかける
+
+ITEM = re.compile(r"^(\s*)-\s*\[([ ~x])\]\s*(.*)$")
+ISO = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+MD = re.compile(r"(?<![\d/-])(\d{1,2})/(\d{1,2})(?![\d/])")
+BOLD_MD = re.compile(r"\*\*(.+?)\*\*")
+
+
+def now_block() -> list[str]:
+    """state.md の `## Now` ブロック。次の一手。締めのたびに**書き直される**。
+
+    ブリーフの中で、スクリプトが導出できない唯一の行。ほかは全部カレンダーと
+    backlog から計算できるが、ここだけは判断なので、`closeout` が書き、
+    メニューは描くだけ。これが無いとブリーフは「何が期限か」は言えても
+    「まず何をするか」は言えない。
+    """
+    try:
+        text = (ROOT / "state.md").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    out, inside, comment = [], False, False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            if inside:
+                break
+            inside = line.lstrip("# ").strip().lower().startswith("now")
+            continue
+        if not inside or not line.strip():
+            continue
+        # このブロックには、保守の仕方を書いた HTML コメントが入っている。
+        # あれはファイルを編集する人への指示であって、ブリーフに出すものではない。
+        if "<!--" in line:
+            comment = "-->" not in line
+            continue
+        if comment:
+            comment = "-->" not in line
+            continue
+        text_ = re.sub(r"[*`]", "", re.sub(r"^[-*]\s+", "", line.strip()))
+        # 雛形の「（まだありません…）」は編集する人への案内。初回のブリーフに
+        # そのまま出ると、相手には意味の分からない一行になる。
+        if text_.startswith("（まだありません"):
+            continue
+        out.append(text_)
+    return out[:3]
+
+
+def cal_rows(days: int = 8, refresh: bool = False) -> list[dict]:
+    """カレンダー層。ディスクにキャッシュする。
+
+    **古いカレンダーは無いよりまし。無いカレンダーは固まったプロンプトよりまし。**
+    だから取得に失敗したらキャッシュに落ち、キャッシュも空ならカレンダーの行を
+    黙って落とす。ブリーフは backlog だけでも立つ。
+    """
+    cache = CACHE / "agenda.json"
+    if not refresh and cache.is_file() and (time.time() - cache.stat().st_mtime) < CAL_TTL:
+        try:
+            return json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    try:
+        raw = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "gcal" / "gcal.py"),
+             "agenda", "--days", str(days), "--json"],
+            capture_output=True, text=True, timeout=CAL_TIMEOUT,
+        ).stdout.strip()
+        rows = json.loads(raw)
+        CACHE.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        return rows
+    except Exception:
+        pass
+    try:
+        return json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def parse_due(text: str) -> dt.date | None:
+    """⏰ マーカーから日付を取る。ISO 形式が優先。M/D は最も近いその日に解決する。
+
+    **意図的に保守的。** 「⏰来月の渡航まで」のような書き方は日付を持たないので、
+    推測して締切一覧に載せるのではなく、日付なしのまま置く。
+    スタートメニューに出る**間違った日付は、日付が無いことより悪い**。
+    """
+    m = ISO.search(text)
+    if m:
+        try:
+            return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = MD.search(text)
+    if not m:
+        return None
+    today = dt.date.today()
+    for year in (today.year, today.year + 1, today.year - 1):
+        try:
+            d = dt.date(year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            continue
+        if -180 <= (d - today).days <= 300:
+            return d
+    return None
+
+
+def title_of(text: str) -> str:
+    """その項目自身の見出し。締切マーカーも説明も外したもの。
+
+    太字が見出しとして効くのは、それが項目の**冒頭にあるとき**だけ。
+    本文の途中で警告を太字にしている項目は多く、それが見出しになってはいけない。
+    """
+    m = BOLD_MD.search(text)
+    t = m.group(1) if (m and m.start() <= 3) else text.split("⏰")[0]
+    t = re.sub(r"\s*⏰.*$", "", t)
+    t = re.sub(r"[*_`]", "", t)
+    return t.strip(" 　:：。.、,")
+
+
+def backlog_items(path: Path, domain: str) -> list[dict]:
+    """1つの backlog の中の開いた項目。⏰ を持つものはその日付つきで返す。
+
+    1項目 = チェックボックスの行 + その下のインデントされた行。
+    ⏰ は見出し行ではなく continuation 行に載っていることが多いため。
+    節の除外規則は open_items と同じ。
+    """
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    items: list[dict] = []
+
+    def close(cur):
+        """⏰ は**その行の中だけ**読む。項目の本文をまたいで探さないこと。
+
+        各項目は末尾に `_(追加 YYYY-MM-DD / owner: …)_` を持つので、
+        ⏰ の行を超えて走査すると、その**追加日**を拾って締切として登録してしまう。
+        「⏰9/25 定例まで」が「1日超過」と表示されたのはこれが原因。
+        """
+        if not cur or cur["state"] not in " ~":
+            return
+        body = cur.pop("body")
+        # 🔒 が項目のどこかにあれば、この端末から出さない印。PRIVATE 参照。
+        cur["private"] = any(PRIVATE in line for line in body)
+        cur["decision"] = any(DECISION in line for line in body)
+        m = next((ADDED.search(line) for line in body if ADDED.search(line)), None)
+        cur["added"] = dt.date.fromisoformat(m.group(1)) if m else None
+        # closeout の「続ける」出口が残した次の一手。これがある [~] だけが resume の対象。
+        cur["next"] = next((l.split("next:", 1)[1].strip() for l in body if "next:" in l), "")
+        for line in body:
+            if "⏰" in line:
+                cur["due"] = parse_due(line.split("⏰", 1)[1])
+                cur["dated"] = True
+                break
+        items.append(cur)
+
+    cur, skip = None, False
+    for line in lines + ["## "]:
+        if line.startswith("## "):
+            close(cur)
+            cur = None
+            skip = line[3:].strip().startswith(("💤", "完了", "Done"))
+            continue
+        m = ITEM.match(line)
+        if m and not m.group(1):
+            close(cur)
+            cur = None if skip else {
+                "state": m.group(2), "title": title_of(m.group(3)), "domain": domain,
+                "body": [m.group(3)], "due": None, "dated": False,
+            }
+            continue
+        if cur is not None and line.strip():
+            cur["body"].append(line.strip())
+    return items
+
+
+def all_items() -> list[dict]:
+    """リポジトリ内の開いた backlog 項目すべて。ドメイン名つき。横断分も含む。"""
+    out = []
+    for domain in sorted(DOMAINS.iterdir()):
+        if is_domain_dir(domain):
+            out += backlog_items(domain / "backlog.md", domain.name)
+    out += backlog_items(ROOT / "tasks" / "backlog.md", "横断")
+    return out
+
+
+DECISION = "⚠要判断"
+ADDED = re.compile(r"追加\s*(20\d{2}-\d{2}-\d{2})")
+DONE = re.compile(r"✅\s*(20\d{2}-\d{2}-\d{2})")
+FLOW_DAYS = 7
+
+
+def decisions() -> list[dict]:
+    """あなたの判断待ちの項目を古い順に。ここが詰まっているのは人間の側なので、
+    AI がどれだけ働いても動かない項目たち。"""
+    return sorted((i for i in all_items() if i["decision"]),
+                  key=lambda i: i["added"] or dt.date.max)
+
+
+def flow(today: dt.date, days: int = FLOW_DAYS) -> tuple[int, int]:
+    """全 backlog の直近 `days` 日の (追加, 完了)。
+
+    追加 = 期間内の `追加 YYYY-MM-DD`。完了 = 期間内の日付がついた `[x]` の行。
+    `✅` の日付があればそれ、無ければ追加日以外でいちばん新しい日付。✅ の作法
+    だけでなくチェックそのものを信じるので、素直に閉じるドメインが損をしない。
+    上の解析は 完了 の節を飛ばすので、ここではファイルをそのまま読む。
+    """
+    since = today - dt.timedelta(days=days - 1)
+    added = done = 0
+    paths = [d / "backlog.md" for d in DOMAINS.iterdir() if is_domain_dir(d)]
+    paths.append(ROOT / "tasks" / "backlog.md")
+    for path in paths:
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for m in ADDED.finditer(line):
+                if since <= dt.date.fromisoformat(m.group(1)) <= today:
+                    added += 1
+            if re.match(r"\s*-\s*\[x\]", line):
+                m = DONE.search(line)
+                if m:
+                    day = dt.date.fromisoformat(m.group(1))
+                else:
+                    rest = ADDED.sub("", line)
+                    found = re.findall(r"20\d{2}-\d{2}-\d{2}", rest)
+                    day = max(dt.date.fromisoformat(f) for f in found) if found else None
+                if day and since <= day <= today:
+                    done += 1
+    return added, done
+
+
+def due_word(d: dt.date, today: dt.date) -> str:
+    n = (d - today).days
+    if n < 0:
+        return f"{-n}日超過"
+    return {0: "今日", 1: "あす", 2: "あさって"}.get(n, f"{n}日後")
+
+
+def hhmm(s: str | None) -> int:
+    try:
+        h, m = s.split(":")
+        return int(h) * 60 + int(m)
+    except (AttributeError, ValueError):
+        return -1
+
+
+FOCUS_PREFIX = re.compile(r"^今日の一点[:：]\s*")
+
+
+def same_thing(a: str, b: str) -> bool:
+    """カレンダーの題名と backlog の題名が同じ用事を指していれば True。
+
+    カレンダーの予定はたいてい backlog の項目**から**入れるので、放っておくと
+    同じ面談が今週の欄に言い回し違いで2回並ぶ（`【面談】A社 田中様` と
+    `A社 田中さん 初回面談`）。文字の2-gram なら言い換えを越えて一致する。
+    完全一致では越えられない。
+    """
+    def grams(s: str) -> set:
+        s = re.sub(r"[\s\W_]+", "", s.lower())
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+    ga, gb = grams(a), grams(b)
+    if not ga or not gb:
+        return False
+    return len(ga & gb) / min(len(ga), len(gb)) >= 0.5
+
+
+def computed_nudges(today: dt.date) -> list[str]:
+    """スクリプトが導出できる声かけ。締めの判断を主役にするため1件まで。"""
+    out = []
+    days = sorted(p.stem for p in DIARY.glob("*.md") if ISO.match(p.stem)) if DIARY.is_dir() else []
+    last = dt.date.fromisoformat(days[-1][:10]) if days else None
+    if last and (today - last).days >= DIARY_NUDGE:
+        out.append(f"{last.month}/{last.day} から日誌が止まっています。記憶が新しいうちに `log` を。")
+    sent = sent_nudge()
+    if sent:
+        out.append(sent)
+    return out[:1]
+
+
+SENT_CACHE = CACHE / "sent-check.json"
+
+
+def sent_nudge(refresh: bool = False) -> str | None:
+    """送信待ちのまま残っているが、Gmail では送ってある項目の数を1行に。
+
+    送ったメールが backlog では「送信待ち」のまま残り、ブリーフが何日も
+    それを今日の仕事として出し続けた。`bin/sent-check` が送信済みフォルダに聞き、
+    ここは件数だけを出す（見出しは出さないので、私的な中身は外へ出ない）。
+    起動を待たせないよう、1時間キャッシュする。"""
+    try:
+        cached = json.loads(SENT_CACHE.read_text(encoding="utf-8"))
+        if not refresh and time.time() - cached.get("at", 0) < 3600:
+            return cached.get("text") or None
+    except (OSError, ValueError):
+        pass
+    try:
+        r = subprocess.run([sys.executable, str(ROOT / "bin" / "sent-check"), "--json"],
+                           capture_output=True, text=True, timeout=20)
+        n = sum(1 for p in json.loads(r.stdout or "[]") if p.get("status") == "sent")
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    text = (f"送信待ちの項目が{n}件、Gmail では送ってあります。"
+            "`python3 bin/sent-check` を見て片付けてください。") if n else ""
+    try:
+        SENT_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        SENT_CACHE.write_text(json.dumps({"at": time.time(), "text": text}), encoding="utf-8")
+    except OSError:
+        pass
+    return text or None
+
+
+HEALTH_CACHE = CACHE / "health.json"
+
+
+def health_nudge(today: dt.date, refresh: bool = False) -> str | None:
+    """システムの健康状態を「忘れずに」の1行として返す。元は `bin/lint --health`。
+
+    計算は1日1回。セッションの開始が会話記録の走査（2秒ほど）を待ってはいけないため。
+    優先度はいちばん低い: 締めと日誌の声かけが埋めなかった枠にだけ入り、
+    健康なときは何も言わない。
+    """
+    try:
+        cached = json.loads(HEALTH_CACHE.read_text(encoding="utf-8"))
+        if not refresh and cached.get("date") == today.isoformat():
+            text = cached.get("text", "")
+            return f"点検: {text}。`self-diagnose` を回す頃合いです。" if text else None
+    except (OSError, ValueError):
+        pass
+    try:
+        out = subprocess.run([sys.executable, str(ROOT / "bin" / "lint"), "--health"],
+                             capture_output=True, text=True, timeout=20)
+        text = out.stdout.strip() if out.returncode == 0 else ""
+    except (subprocess.SubprocessError, OSError):
+        return None
+    try:
+        HEALTH_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        HEALTH_CACHE.write_text(json.dumps({"date": today.isoformat(), "text": text}), encoding="utf-8")
+    except OSError:
+        pass
+    return f"点検: {text}。`self-diagnose` を回す頃合いです。" if text else None
+
+
+def html_title(path: Path) -> str:
+    try:
+        head = path.read_text(encoding="utf-8", errors="ignore")[:4000]
+    except OSError:
+        return ""
+    t = re.search(r"<title[^>]*>(.*?)</title>", head, re.S | re.I)
+    return re.sub(r"\s+", " ", t.group(1)).strip() if t else ""
+
+
+def file_date(p: Path, mtime: float) -> str:
+    """リポジトリ内なら最後のコミット日（checkout は全ファイルの mtime を書き換えるので、
+    何か月も前のページが先週のものに見える）。それ以外はファイル自身の mtime。"""
+    try:
+        if p.resolve().is_relative_to(ROOT):
+            out = subprocess.run(["git", "-C", str(ROOT), "log", "-1", "--format=%cI", "--", str(p)],
+                                 capture_output=True, text=True, timeout=3).stdout.strip()
+            if out:
+                return dt.datetime.fromisoformat(out).replace(tzinfo=None).isoformat(timespec="seconds")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return dt.datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+
+
+def recent_work(n: int = RECENT_N) -> list[dict]:
+    """直近のアーティファクトとローカルの HTML ページ。新しい順、リンクつき。
+
+    フォルダごとに1件（デッキのフォルダには index も下書きも入っている）。
+    アーティファクトとして公開済みのローカルファイルは、アーティファクトとして出す。
+    """
+    items, published = {}, set()
+    try:
+        lines = ARTIFACT_LOG.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for ln in lines:
+        try:
+            a = json.loads(ln)
+        except ValueError:
+            continue
+        if a.get("source"):
+            published.add(str(Path(a["source"]).resolve().parent))
+        prev = items.get(a["url"])
+        if not prev or a["at"] > prev["at"]:
+            items[a["url"]] = {"at": a["at"], "title": a.get("title") or "artifact",
+                               "url": a["url"], "kind": "artifact"}
+    folders: dict = {}
+    for root in HTML_ROOTS:
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*.html"):
+            if any(x in p.parts for x in (".git", "node_modules")) or "template" in p.name:
+                continue
+            folder = str(p.resolve().parent)
+            if folder in published:
+                continue
+            mt = p.stat().st_mtime
+            if folder not in folders or mt > folders[folder][0]:
+                folders[folder] = (mt, p)
+    art_titles = {a["title"] for a in items.values()}
+    for mt, p in folders.values():
+        at = file_date(p, mt)
+        title = html_title(p) or (p.parent.name if p.stem == "index" else p.stem)
+        if title in art_titles:
+            continue
+        items[str(p)] = {"at": at, "title": title, "url": p.resolve().as_uri(), "kind": "local"}
+    return sorted(items.values(), key=lambda r: r["at"], reverse=True)[:n]
+
+
+def brief_model(names: dict, refresh: bool = False) -> dict:
+    """ブリーフを**データ**として返す。どの surface も同じ計算から描くため。
+
+    端末はセッション開始時にこれを描く。朝の通知やスマホへの push を足すときも、
+    **その surface に自分のソースを与えない**こと。二重に計算されたブリーフは
+    二つのブリーフであり、保守されない方が必ず腐る。ここが唯一の継ぎ目。
+
+    形は 今日 → 今週 → 忘れずに → 最近の成果物。以前は3行の段落と締切の表と
+    進行中の一覧を1画面に詰めていて、肝心の「今日」が見つからなかった。だから
+    今日を先頭に、1つのことに1行、各ブロックに上限、残りは `b` の裏に畳む。
+
+    各行は 🔒 由来の `private` を持つ。この描画は無視する（端末はこの機械の中）。
+    外に出る surface だけが `private` の行を件数に畳む。
+    """
+    today = dt.date.today()
+    clock = dt.datetime.now()
+    now_min = clock.hour * 60 + clock.minute
+    rows = cal_rows(refresh=refresh)
+    items = all_items()
+
+    def ev(r: dict) -> dict:
+        title = r["title"].lstrip("⏰ ")
+        return {"time": r["time"], "title": FOCUS_PREFIX.sub("", title), "kind": "event",
+                "focus": r["purpose"] == "focus", "private": PRIVATE in title}
+
+    def it(i: dict) -> dict:
+        return {"time": None, "title": i["title"], "focus": False, "kind": "task",
+                "label": "" if i["domain"] == "横断" else names.get(i["domain"], i["domain"]),
+                "private": i.get("private", False)}
+
+    m: dict = {"date": today.isoformat(), "at": clock.strftime("%H:%M")}
+
+    per_dom: dict = {}
+
+    def day_rows(d: dt.date, after: int | None = None) -> list[dict]:
+        """1日分。カレンダーが先、そのあとカレンダーに無い backlog の締切。
+
+        backlog の項目はブリーフ全体で1ドメイン2件まで。1つの会議に5件
+        ぶら下がることは普通にあり、上限が無いとそのドメインが欄を占拠する。
+        """
+        cal_d = [r for r in rows if r["date"] == d.isoformat()]
+        timed = sorted((r for r in cal_d if r["time"]), key=lambda r: hhmm(r["time"]))
+        if after is not None:
+            timed = [r for r in timed if hhmm(r["time"]) >= after]
+        out = [ev(r) for r in timed] + [ev(r) for r in cal_d if not r["time"]]
+        for i in items:
+            if i["due"] != d or any(same_thing(i["title"], r["title"]) for r in cal_d):
+                continue
+            if per_dom.get(i["domain"], 0) >= 2:
+                continue
+            per_dom[i["domain"]] = per_dom.get(i["domain"], 0) + 1
+            out.append(it(i))
+        return out
+
+    # --- 先頭の日。ふつうは今日。ただし1時間以上前に始まった予定はもう過去で、
+    # 何も残っていない夜のセッションは、終わった1日を繰り返さず明日から始める。
+    lead = today
+    ahead = day_rows(today, after=now_min - 60)
+    if not ahead and clock.hour >= 18:
+        lead = today + dt.timedelta(days=1)
+        ahead = day_rows(lead)
+    m["lead"] = {"date": lead.isoformat(), "is_today": lead == today,
+                 "rows": ahead[:6], "spill": max(0, len(ahead) - 6)}
+
+    # --- 期限切れのうち、まだ判断の対象になる新しさのもの。古いものは数えるだけ。
+    # 1か月遅れの項目は朝の問題ではなく backlog の問題。
+    late = [i for i in items if i["due"] and i["due"] < today]
+    live_late = sorted((i for i in late if (today - i["due"]).days <= OVERDUE_FOLD),
+                       key=lambda i: i["due"])
+    m["overdue"] = [dict(it(i), days=(today - i["due"]).days) for i in live_late[:2]]
+    m["overdue_more"] = len(late) - len(m["overdue"])
+
+    # --- 今週: 先頭の日の翌日から。1日3行、合計6行まで。
+    # これは見通しであって予定表ではない。全部は `b` にある。
+    week, shown, spill = [], 0, 0
+    for n in range(1, 7):
+        d = lead + dt.timedelta(days=n)
+        if (d - today).days > 6:
+            break
+        rs = day_rows(d)
+        keep = rs[:min(3, 6 - shown)]
+        spill += len(rs) - len(keep)
+        if keep:
+            week.append({"date": d.isoformat(), "rows": keep})
+            shown += len(keep)
+    m["week"] = {"days": week, "spill": spill, "open": len(items)}
+
+    # --- 忘れずに: カレンダーには出ないもの。
+    # 締めが `## Now` に書く最大3行（予定に入らない大事なこと: 返信、練習、
+    # 振り返る価値のある出来事）と、ファイルから計算した声かけ。
+    # 入っている予定の言い直しにはしない。
+    nudges = computed_nudges(today)
+    hand = now_block()[:3 - len(nudges)]
+    if len(hand) + len(nudges) < 3:
+        health = health_nudge(today, refresh)
+        if health:
+            nudges.append(health)
+    m["dontmiss"] = ([{"text": t, "source": "closeout", "private": PRIVATE in t} for t in hand]
+                     + [{"text": t, "source": "computed", "private": False} for t in nudges])
+    m["recent"] = recent_work()
+    return m
+
+
+WEEKDAYS = "月火水木金土日"
+
+
+def day_label(d: dt.date) -> str:
+    return f"{d.month}/{d.day}({WEEKDAYS[d.weekday()]})"
+
+
+def greeting(hour: int) -> str:
+    if hour < 5:
+        return "夜更かしですね。いまの状況です。"
+    if hour < 12:
+        return "おはようございます。今日の予定です。"
+    if hour < 18:
+        return "こんにちは。今日の残りです。"
+    return "こんばんは。この先の予定です。"
+
+
+def wrap(text: str, width: int) -> list[str]:
+    """端末の桁数で折り返す。日本語には空白が無いので、どこでも折る。"""
+    lines, cur = [], ""
+    for ch in text:
+        if dwidth(cur + ch) > width:
+            cut = cur.rfind(" ")
+            if cut > width // 2:
+                lines.append(cur[:cut])
+                cur = cur[cut + 1:]
+            else:
+                lines.append(cur)
+                cur = ""
+        cur += ch
+    if cur.strip():
+        lines.append(cur)
+    return lines
+
+
+def starter_items(n: int = 3) -> list[str]:
+    """はじめの一歩のうち、まだのもの。全部終わるかファイルが無ければ空。"""
+    if not ONBOARDING.exists():
+        return []
+    todo = []
+    for ln in ONBOARDING.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\s*- \[ \] (.+)", ln)
+        if m:
+            todo.append(m.group(1).strip())
+    return todo[:n]
+
+
+def render_first_run(c) -> None:
+    """名前がまだ無い = setup 前。ブリーフの代わりに、入口を1つだけ見せる。"""
+    print(f"  {c('はじめまして。', GOLD + BOLD)}")
+    print()
+    print("    わたしはまだ名前のない、あなた専用のAIです。")
+    print("    最初に5分だけ、名前と呼び方を一緒に決めましょう。")
+    print()
+    print(f"    {c('›', GOLD)} 入力欄に  setup  と打って return")
+    print()
+
+
+def render_brief(c, names, model: dict) -> None:
+    """既定の表示。**どこに何があるか**ではなく、**何をするか**。
+
+    今日 → 今週 → 忘れずに、1つのことに1行（最近の成果物は main が最後に出す）。
+    ドメイン一覧は置かない（`d` のキー1つ先）。一目で読めないブリーフは読まれない。
+
+    内容は決めない。`brief_model()` が決めたものを端末向けに描くだけ。
+    """
+    def head(t: str) -> None:
+        print(f"  {c(t, GOLD + BOLD)}")
+
+    def when(r: dict) -> str:
+        # どの行も先頭の列を自分で持つ。時刻の無い行が、上の時刻つきの行の
+        # 続きに読めてしまう（1つの段落に見える）ことがないように。
+        return r["time"] or ("終日" if r.get("kind") == "event" else "·")
+
+    def line(r: dict, width: int = 50) -> None:
+        mark = c("◆ ", GOLD) if r.get("focus") else ""
+        tail = c(f"  {r['label']}", DIM) if r.get("label") else ""
+        print(f"    {c(pad(when(r), 9), DIM)}{mark}{trunc(r['title'], width)}{tail}")
+
+    print(f"  {greeting(dt.datetime.now().hour)}")
+    print()
+
+    lead = model["lead"]
+    head("今日" if lead["is_today"] else "明日")
+    if lead["rows"]:
+        for r in lead["rows"]:
+            line(r)
+        if lead["spill"]:
+            more = f"ほか {lead['spill']}件"
+            print(f"    {c(more, DIM)}")
+    else:
+        print(f"    {c('予定なし', DIM)}")
+    for o in model["overdue"]:
+        age = f"{o['days']}日超過"
+        print(f"    {c('⚠ 期限切れ', GOLD)}  {trunc(o['title'], 44)}  {c(age, DIM)}")
+    print()
+
+    w = model["week"]
+    if w["days"]:
+        head("今週")
+        for day in w["days"]:
+            d = dt.date.fromisoformat(day["date"])
+            for n, r in enumerate(day["rows"]):
+                label = day_label(d) if n == 0 else ""
+                tail = c(f"  {r['label']}", DIM) if r.get("label") else ""
+                print(f"    {c(pad(label, 10), DIM)}{c(pad(when(r), 9), DIM)}"
+                      f"{trunc(r['title'], 42)}{tail}")
+        if w["spill"]:
+            more = f"ほか {w['spill']}件  → b"
+            print(f"    {c(more, DIM)}")
+        print()
+
+    if model["dontmiss"]:
+        head("忘れずに")
+        for f in model["dontmiss"]:
+            for n, ln in enumerate(wrap(f["text"], 64)):
+                print(f"    {'›' if n == 0 else ' '} {ln}")
+        print()
+
+    if model.get("starter"):
+        head("はじめの一歩")
+        for t in model["starter"]:
+            print(f"    {c('□', GOLD)} {trunc(t, 60)}")
+        print(f"    {c('「チュートリアル」と言えば、次の1つを一緒にやります', DIM)}")
+        print()
+
+
+def render_backlog(c, names) -> None:
+    """ブリーフが畳んだもの全部。`→ b` の行き先。
+
+    締切順。ブリーフがその順で並べたのだから、ここで別の順にすると
+    2つの表示が食い違うだけ。日付なしの項目は列挙せずドメインごとに数える。
+    開いた項目を50件ベタ書きしても誰も読まない。それこそブリーフが直そうとした失敗。
+    """
+    today = dt.date.today()
+    items = all_items()
+    dated = sorted((i for i in items if i["due"]), key=lambda i: i["due"])
+
+    def block(title: str, rows: list[dict]) -> None:
+        if not rows:
+            return
+        print(f"  {c(title, GOLD + BOLD)}")
+        for i in rows:
+            late = (today - i["due"]).days > 0
+            stamp_ = f"{i['due']:%m/%d}"
+            print(f"    {c(pad(stamp_, 7), GOLD if late else DIM)}"
+                  f"{c(pad(due_word(i['due'], today), 10), DIM)}"
+                  f"{pad(trunc(i['title'], 44), 46)}"
+                  f"{c(names.get(i['domain'], i['domain']), DIM)}")
+        print()
+
+    waiting = decisions()
+    if waiting:
+        print(f"  {c('要判断（あなたの判断待ち、古い順）', GOLD + BOLD)}")
+        for i in waiting:
+            age = f"{(today - i['added']).days}日" if i["added"] else "?"
+            print(f"    {c(pad(age, 7), GOLD if i['added'] and (today - i['added']).days > 7 else DIM)}"
+                  f"{pad(trunc(i['title'], 54), 56)}"
+                  f"{c(names.get(i['domain'], i['domain']), DIM)}")
+        print()
+    added, done = flow(today)
+    print(f"  {c('直近7日の流量', GOLD + BOLD)}  追加 {added} ・ 完了 {done}"
+          + (c("  （増える一方）", GOLD) if added >= 2 * max(done, 1) and added >= 5 else ""))
+    print()
+
+    block("期限切れ", [i for i in dated if i["due"] < today])
+    block("締切", [i for i in dated if i["due"] >= today])
+
+    fuzzy = [i for i in items if i["dated"] and not i["due"]]
+    if fuzzy:
+        print(f"  {c('⏰日付なし (絶対日付を入れないと brief に乗りません)', GOLD + BOLD)}")
+        for i in fuzzy:
+            print(f"    {pad(trunc(i['title'], 52), 54)}"
+                  f"{c(names.get(i['domain'], i['domain']), DIM)}")
+        print()
+
+    rest: dict[str, int] = {}
+    for i in items:
+        if not i["dated"]:
+            rest[i["domain"]] = rest.get(i["domain"], 0) + 1
+    if rest:
+        line = " · ".join(f"{names.get(d, d)} {n}"
+                          for d, n in sorted(rest.items(), key=lambda kv: -kv[1]))
+        print(f"  {c('日付なしの未着手', GOLD + BOLD)}  {c(trunc(line, 60), DIM)}")
+        print(c("    → 各ドメインの backlog.md", DIM))
+        print()
+
+def render_resume(c, names) -> None:
+    """`resume`：closeout の「続ける」出口が `next:` を残した [~] の項目すべて。
+    途中の仕事が置かれる場所は backlog だけ。"""
+    items = [i for i in all_items() if i["state"] == "~" and i["next"]]
+    print(c(f"  途中保存（{len(items)}件）", GOLD + BOLD))
+    for n, i in enumerate(items, 1):
+        print(f"  {n:>2}  {trunc(i['title'], 56)}  {c(names.get(i['domain'], i['domain']), DIM)}")
+        if i["next"]:
+            print(c(f"      next: {trunc(i['next'], 64)}", DIM))
+    if not items:
+        print(c("  途中保存はありません", DIM))
+    print()
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    show_all = "--all" in args
+    show_domains = "--domains" in args
+    show_backlog = "--backlog" in args
+    show_resume = "--resume" in args
+    as_json = "--json" in args
+    refresh = "--refresh" in args
+    top = 5
+    if "--top" in args:
+        try:
+            top = int(args[args.index("--top") + 1])
+        except (IndexError, ValueError):
+            pass
+    c = color(sys.stdout.isatty() and "--no-color" not in args)
+    names = labels()
+    now = dt.datetime.now()
+    branch, state = git_state()
+
+    # ブリーフをデータとして出す。端末以外の surface 用。
+    # 読む側は stdout に JSON だけを期待するので、飾りより先に返す。
+    if as_json:
+        model = brief_model(names, refresh=refresh)
+        model["starter"] = starter_items()
+        print(json.dumps(model, ensure_ascii=False))
+        return
+
+    if UNSET and not (show_all or show_domains or show_backlog or show_resume):
+        print()
+        render_first_run(c)
+        return
+
+    print()
+    print(c(f"{ICON} {NAME}", GOLD + BOLD) + c(
+        f"  \u00b7  {now:%a %Y-%m-%d %H:%M}  \u00b7  {branch} ({state})", DIM))
+    print()
+
+    if show_backlog:
+        render_backlog(c, names)
+        return
+    if show_resume:
+        render_resume(c, names)
+        return
+
+    if not (show_all or show_domains):
+        model_cache = brief_model(names, refresh=refresh)
+        model_cache["starter"] = starter_items()
+        render_brief(c, names, model_cache)
+        print()
+        n_skills = len(list((ROOT / ".claude" / "skills").glob("*/SKILL.md")))
+        cps, _ = counts()
+        n_open = len(all_items())
+        n_dom = sum(1 for d in sorted(DOMAINS.iterdir()) if is_domain_dir(d))
+        late = model_cache["overdue_more"] + len(model_cache["overdue"])
+        n_dec = len(decisions())
+        foot = (f"  b  backlog（{n_open}件" + (f"、期限切れ {late}件" if late else "")
+                + (f"、判断待ち {n_dec}件" if n_dec else "") + "）")
+        foot += f"     d  ドメイン（{n_dom}）     h  履歴     m  地図"
+        if cps:
+            foot += f"     resume（{cps}）"
+        print(c(foot, DIM))
+        print(c("  do  " + " · ".join(VERBS_JA[v] for v in VERBS) + f"     スキル（{n_skills}個）", DIM))
+        print()
+        # 最後に、桁揃えではなく Markdown で出す。ブリーフを再現する側は
+        # ここより上をコードブロックに入れ、これをその下に置く。
+        # コードブロックの中ではリンクが死ぬため。
+        if model_cache["recent"]:
+            print("最近の成果物")
+            for r in model_cache["recent"]:
+                d = dt.datetime.fromisoformat(r["at"])
+                print(f"- {d.month}/{d.day} · [{r['title']}]({r['url']})")
+            print()
+        return
+
+    rows = scan()
+    lanes = lane_order(rows)
+    nums = numbering(lanes)
+    cps, _ = counts()
+
+    def display(r: dict) -> str:
+        name = names.get(r["slug"], r["slug"])
+        return f"\u25b8 {name}" if r["parent"] else name
+
+    def line(r: dict, width: int, indent: str = "") -> None:
+        key = str(nums.get(r["slug"], "?"))
+        # 旗が付くのは、開いた項目のある backlog を実際に持つドメインだけ。
+        # 無いときは何も出さない。「⚑0」と出すと、まだ backlog を持たない
+        # ドメインで「カウンタが壊れている」ように読めてしまう。
+        bl = f"  {c('⚑' + str(r['backlog']), GOLD)}" if r.get("backlog") else ""
+        print(f"{indent} {c(key.rjust(2), GOLD + BOLD)}  {pad(display(r), width)}"
+              f"{pad(ago(r['day']), 6)}"
+              f"idx {k(r['idx'])}{flag(r['idx'])} / dom {k(r['total'])}{bl}")
+        if r["note"]:
+            print(f"{indent}      {c(trunc(r['note'], 62), DIM)}")
+        if r["idx"] >= RED_AT and r["heaviest"][1]:
+            print(c(f"{indent}      ⚠ 最重量: {r['heaviest'][0]} {k(r['heaviest'][1])}", DIM))
+
+    if show_all:
+        for lane, bucket in lanes:
+            print(c(f" {lane}", DIM))
+            for r in bucket:
+                line(r, 22, indent="  ")
+            print()
+        return
+
+    recent = sorted(rows, key=lambda r: (r["day"] or dt.date.min), reverse=True)[:top]
+    for r in recent:
+        line(r, 22)
+    print()
+    n_skills = len(list((ROOT / ".claude" / "skills").glob("*/SKILL.md")))
+    do = " do   " + " · ".join(VERBS_JA[v] for v in VERBS)
+    if n_skills:
+        do += f"     skill  全{n_skills}個（日本語名あり）"
+    print(c(do, DIM))
+    rest = len(rows) - len(recent)
+    foot = f" m  地図（ほか {rest}件）     b  backlog（開 {len(all_items())}件）"
+    sessions = session_count()
+    if sessions:
+        foot += f"     h  履歴（{sessions}件）"
+    if cps:
+        foot += f"     resume（途中保存 {cps}件）"
+    print(c(foot, DIM))
+    print()
+
+
+if __name__ == "__main__":
+    main()
