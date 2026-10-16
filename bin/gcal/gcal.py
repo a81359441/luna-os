@@ -83,9 +83,34 @@ def die(msg):
 
 # ---------------------------------------------------------------- auth (refresh only)
 
+def seed_token():
+    """クラウドのコンテナにはトークンのファイルが無い。あるのは環境が渡すものだけ。
+
+    GCAL_TOKEN_JSON には、手元で auth.py が書くのと同じ JSON を入れる（環境の
+    シークレットとして。リポジトリには絶対に入れない）。一度だけファイルに書き出し、
+    以降は手元と同じように、下の更新処理がアクセストークンを保つ。
+    """
+    raw = os.environ.get("GCAL_TOKEN_JSON", "").strip()
+    if os.path.exists(TOKEN_FILE) or not raw:
+        return
+    try:
+        json.loads(raw)  # 壊れたシークレットは、ゴミを書く前に断る
+    except ValueError:
+        die("GCAL_TOKEN_JSON が正しい JSON ではありません。トークンのファイルを丸ごと貼ってください。")
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(raw)
+
+
+def have_token():
+    seed_token()
+    return os.path.exists(TOKEN_FILE)
+
+
 def load_token():
-    if not os.path.exists(TOKEN_FILE):
-        die(f"トークンがありません: {TOKEN_FILE}\n実行してください:  python3 bin/gcal/auth.py")
+    if not have_token():
+        die(f"トークンがありません: {TOKEN_FILE}\n実行してください:  python3 bin/gcal/auth.py  （または GCAL_TOKEN_JSON を設定）")
     with open(TOKEN_FILE) as f:
         return json.load(f)
 
@@ -185,7 +210,16 @@ def save_state(state):
 
 
 def own_cal_id(required=True):
-    cal = load_state().get("calendar_id")
+    state = load_state()
+    cal = state.get("calendar_id")
+    if not cal and have_token():
+        # まっさらなチェックアウト（クラウドのセッション）には、トークンはあっても
+        # 状態ファイルが無い。2つ目を作らず、既にあるカレンダーを名前で探す。
+        found = [c for c in calendars() if c.get("summary") == CAL_NAME]
+        if found:
+            cal = found[0]["id"]
+            state.update(calendar_id=cal, calendar_name=CAL_NAME)
+            save_state(state)
     if not cal and required:
         die(f"{NAME} のカレンダーがまだありません。\n実行してください:  python3 bin/gcal/gcal.py init")
     return cal

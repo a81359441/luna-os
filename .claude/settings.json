@@ -34,10 +34,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "git -C \"$CLAUDE_PROJECT_DIR\" fetch --quiet origin 2>/dev/null || true"
-          },
-          {
-            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-marker.sh\""
           },
           {

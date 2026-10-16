@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# 何かがファイルを読む前に、手元の main を origin/main まで進める。
+#
+# ブリーフはこのチェックアウトから計算されるので、チェックアウトが新しい分しか
+# 新しくなれない。スマホ（クラウド）のセッションは origin に commit し、この
+# マシンには commit しない。fetch だけではその commit を取ってきてもファイルは
+# 動かず、ブリーフはスマホで直したはずのものを古いまま出し続ける。
+#
+# 安全な作り: main にいるときだけ、--ff-only だけ（merge commit を作らない。
+# 分岐した main には触らない）。追跡しているファイルの手元の編集が上書きされる
+# ときは git 自身が断る。未追跡のファイルには触らない。ネットが無いときは更新が
+# 無いだけ。呼び出し元を失敗させることはない。
+#
+# 成功したとき、何もすることが無いときは何も出さない。進めたあとも origin より
+# 遅れていれば「behind N」と出すので、呼び出し元はブリーフが古いかもしれないと言える。
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export GIT_TERMINAL_PROMPT=0
+g() { git -C "$ROOT" "$@"; }
+
+[ "$(g branch --show-current 2>/dev/null)" = "main" ] || exit 0
+
+# 上限つき: ネットが死んでいても、セッション開始を止めない。
+# 出力から切り離す: 取り残された fetch が呼び出し元のパイプを掴まないように。
+git -C "$ROOT" fetch --quiet origin main </dev/null >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+kill "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+
+behind="$(g rev-list --count main..origin/main 2>/dev/null || echo 0)"
+[ "${behind:-0}" -gt 0 ] || exit 0
+g merge --ff-only --quiet origin/main >/dev/null 2>&1 || true
+
+behind="$(g rev-list --count main..origin/main 2>/dev/null || echo 0)"
+[ "${behind:-0}" -gt 0 ] && echo "behind $behind"
+exit 0

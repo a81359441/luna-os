@@ -22,6 +22,7 @@ backlog）、今週の見通し、忘れずに（state.md の `## Now` と計算
   bin/menu --json     ブリーフをデータとして出す（端末以外の surface 用）
   bin/menu --refresh  キャッシュを使わずカレンダーを取り直す
   bin/menu --top N    最近の N 件
+  bin/menu --no-sync  main の早送り（bin/sync-main）を飛ばす
 """
 from __future__ import annotations
 
@@ -34,6 +35,12 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
+
+# 時計は日本時間に固定する。クラウドのコンテナは UTC で動くので、夜に開いた
+# セッションが「おはようございます」と言い、午後の予定をまだ先のものとして出した。
+# 手元のマシンが既に日本時間なら、ここは何も変えない。
+os.environ.setdefault("TZ", os.environ.get("AI_TZ", "Asia/Tokyo"))
+time.tzset()
 
 ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parent.parent)
 DOMAINS = ROOT / "knowledge" / "domains"
@@ -379,13 +386,24 @@ def k(n: int) -> str:
     return f"{round(n / 1000)}k" if n >= 1000 else f"{n}"
 
 
-def git_state():
+def sync_main() -> str:
+    """ファイルを読む前に main を origin まで早送りする（bin/sync-main）。
+    できなかったときは「behind N」を返すので、見出しでそう言える。"""
+    try:
+        return subprocess.run([str(ROOT / "bin" / "sync-main")],
+                              capture_output=True, text=True, timeout=15).stdout.strip()
+    except Exception:
+        return ""
+
+
+def git_state(behind: str = ""):
     try:
         br = subprocess.run(["git", "-C", str(ROOT), "branch", "--show-current"],
                             capture_output=True, text=True, timeout=5).stdout.strip()
         dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"],
                                capture_output=True, text=True, timeout=5).stdout.strip()
-        return br or "detached", "dirty" if dirty else "clean"
+        state = "dirty" if dirty else "clean"
+        return br or "detached", f"{state}, {behind}" if behind else state
     except Exception:
         return "?", "?"
 
@@ -416,6 +434,7 @@ def counts():
 CACHE = ROOT / ".session" / "cache"
 CAL_TTL = 3 * 3600      # 秒。セッションの開始が通信を待つことは絶対にあってはならない
 CAL_TIMEOUT = 12        # 秒。これを超えたらカレンダー無しでブリーフを描く
+CAL_STATE = "ok"        # gcal もキャッシュも答えなかったときは "unavailable"
 OVERDUE_FOLD = 30       # 日。これより古い期限切れは1行に畳む
 
 # 持ち出し除外マーカー。既定は parity で、backlog に書いたものは
@@ -488,6 +507,8 @@ def cal_rows(days: int = 8, refresh: bool = False) -> list[dict]:
     だから取得に失敗したらキャッシュに落ち、キャッシュも空ならカレンダーの行を
     黙って落とす。ブリーフは backlog だけでも立つ。
     """
+    global CAL_STATE
+    CAL_STATE = "ok"
     cache = CACHE / "agenda.json"
     if not refresh and cache.is_file() and (time.time() - cache.stat().st_mtime) < CAL_TTL:
         try:
@@ -509,6 +530,9 @@ def cal_rows(days: int = 8, refresh: bool = False) -> list[dict]:
     try:
         return json.loads(cache.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        # カレンダーが読めないことと、予定が空の日は同じではない。ここで
+        # 「予定なし」と出すと、読めなかった日の面接が見えなくなる。
+        CAL_STATE = "unavailable"
         return []
 
 
@@ -875,7 +899,7 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
                 "label": "" if i["domain"] == "横断" else names.get(i["domain"], i["domain"]),
                 "private": i.get("private", False)}
 
-    m: dict = {"date": today.isoformat(), "at": clock.strftime("%H:%M")}
+    m: dict = {"date": today.isoformat(), "at": clock.strftime("%H:%M"), "calendar": CAL_STATE}
 
     per_dom: dict = {}
 
@@ -1032,13 +1056,15 @@ def render_brief(c, names, model: dict) -> None:
 
     lead = model["lead"]
     head("今日" if lead["is_today"] else "明日")
+    if model.get("calendar") == "unavailable":
+        print(f"    {c('⚠ ここからはカレンダーに届きません。backlog だけを出しています。', GOLD)}")
     if lead["rows"]:
         for r in lead["rows"]:
             line(r)
         if lead["spill"]:
             more = f"ほか {lead['spill']}件"
             print(f"    {c(more, DIM)}")
-    else:
+    elif model.get("calendar") != "unavailable":
         print(f"    {c('予定なし', DIM)}")
     for o in model["overdue"]:
         age = f"{o['days']}日超過"
@@ -1151,6 +1177,9 @@ def render_resume(c, names) -> None:
 
 def main() -> None:
     args = sys.argv[1:]
+    # 何よりも先に、どのファイルを読むよりも前に: origin より遅れたチェックアウトから
+    # 作ったブリーフは、スマホのセッションで直したものを古いまま出す。
+    behind = "" if "--no-sync" in args else sync_main()
     show_all = "--all" in args
     show_domains = "--domains" in args
     show_backlog = "--backlog" in args
@@ -1166,7 +1195,7 @@ def main() -> None:
     c = color(sys.stdout.isatty() and "--no-color" not in args)
     names = labels()
     now = dt.datetime.now()
-    branch, state = git_state()
+    branch, state = git_state(behind)
 
     # ブリーフをデータとして出す。端末以外の surface 用。
     # 読む側は stdout に JSON だけを期待するので、飾りより先に返す。
