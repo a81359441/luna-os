@@ -19,7 +19,7 @@ __pycache__/
 .claude/settings.local.json
 
 # セッションの揮発状態（ステータスバーのドメイン表示、再開ポインタ、文脈メーター）
-.session/
+.session
 
 # 秘密情報。絶対にコミットしない。APIキーはローカルの .env にだけ置く
 .env
@@ -29,7 +29,7 @@ __pycache__/
 knowledge/**/_inbox/
 
 # 秘密情報（OAuthクライアント、トークン）。絶対にコミットしない
-.secrets/
+.secrets
 
 # 外部から取り込んだ生データ（メール、分析データ）。揮発する情報
 data/

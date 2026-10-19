@@ -61,6 +61,13 @@ done <<< "$(find "$dir" -maxdepth 1 -name 'domain-*' -mmin "-$WINDOW_MIN" 2>/dev
 [ "$others" -eq 0 ] && exit 0
 
 topic="$(date +%m%d)"
+# worktree の置き場所は絶対パスで出す。親フォルダから開いていると `../` は親の
+# リポジトリに効いてしまう（2026-10-19、ある利用者の環境で親の worktree が切られた）。
+# 親フォルダ自体が git リポジトリなら、その未追跡ファイルに出ないよう一段外に置く。
+root="$(cd "${CLAUDE_PROJECT_DIR:-.}" && pwd)"
+base="$(dirname "$root")"
+git -C "$base" rev-parse --is-inside-work-tree >/dev/null 2>&1 && base="$(dirname "$base")"
+wt="$base/$(basename "$root")-<topic>"
 cat <<MSG
 ⚠️  並行セッション: 直近 ${WINDOW_MIN} 分に、他の ${others} セッションがこのチェックアウトを触っています。
 
@@ -72,8 +79,9 @@ $names
 
 安全な選択肢（上から順に）:
   1. 直列化する。もう一方のウィンドウを先に終わらせる。
-  2. 自分の worktree を切る:  git worktree add ../work-<topic> -b work/<topic>-${topic}
-     そこで作業し、締めで main にマージしてから: git worktree remove ../work-<topic>
+  2. 自分の worktree を切る:  git -C "$root" worktree add "$wt" -b work/<topic>-${topic}
+     そこで作業し、締めで main にマージしてから: git -C "$root" worktree remove "$wt"
+     鍵（.secrets）と状態（.session）は道具が本体から読むので、複製しなくてよい。
 
 どちらにせよ: ステージはパスを明示して行うこと。bulk add は使わない（フックで禁止済み）。
 MSG

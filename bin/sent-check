@@ -28,7 +28,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TOKEN = Path(os.environ.get("GMAIL_TOKEN", ROOT / ".secrets" / "gmail-token.json"))
+# worktree の中では、gitignore 済みの鍵は本体のチェックアウトにある（bin/gmail/gmail.py と同じ解決）
+_git = ROOT / ".git"
+HOME = ROOT
+if _git.is_file() and _git.read_text(encoding="utf-8").startswith("gitdir:"):
+    _gd = (ROOT / _git.read_text(encoding="utf-8")[len("gitdir:"):].strip()).resolve()
+    if _gd.parent.name == "worktrees":
+        HOME = _gd.parent.parent.parent
+TOKEN = Path(os.environ.get("GMAIL_TOKEN", HOME / ".secrets" / "gmail-token.json"))
 # 自分のアドレス（宛先として拾わない）。カンマ区切りで設定する。
 OWN = {a.strip().lower() for a in os.environ.get("AI_OWN_EMAILS", "").split(",") if a.strip()}
 

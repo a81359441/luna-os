@@ -238,6 +238,7 @@ luna
 | `command not found: claude`、またはAIの名前 | Mac がまだ新しい道具に気づいていない | 下の1行を貼り付けて、iTerm を開き直す |
 | プランがない、と言われる | Claude が無料プランのまま | https://claude.ai で Pro 以上に申し込んで、AIの入力欄で `/login` と打つ |
 | 何も反応しない、変な文字が出る | 日本語入力のまま打った | `英数` キーを押して、コピー＆貼り付けでやり直す |
+| `Unknown skill`（「締めて」などが効かない） | AIの名前で開かず、別のフォルダで Claude Code を開いた | AIの名前を打って開き直す。いつも別のフォルダから開きたいなら、AIに「親フォルダの配線をして」と頼む（`bin/wire-parent`） |
 
 `command not found` が直らないときの1行：
 

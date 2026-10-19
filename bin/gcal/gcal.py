@@ -46,8 +46,28 @@ except ImportError:  # pragma: no cover
     sys.exit(1)
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TOKEN_FILE = os.environ.get("GCAL_TOKEN", os.path.join(REPO, ".secrets", "gcal-token.json"))
-STATE_FILE = os.environ.get("GCAL_STATE", os.path.join(REPO, ".session", "gcal.json"))
+
+def main_checkout(repo):
+    """worktree の中でも、鍵と状態は本体のチェックアウトにある。
+
+    `.secrets/` と `.session/` は gitignore 済みなので、新しい worktree には来ない。
+    worktree の `.git` はファイルで、`gitdir: <本体>/.git/worktrees/<名前>` を指す。
+    そこから本体を割り出す（2026-10-19、worktree でブリーフがカレンダーに届かなかった）。
+    """
+    g = os.path.join(repo, ".git")
+    if os.path.isfile(g):
+        with open(g, encoding="utf-8") as f:
+            line = f.read().strip()
+        if line.startswith("gitdir:"):
+            gd = os.path.normpath(os.path.join(repo, line[len("gitdir:"):].strip()))
+            if os.path.basename(os.path.dirname(gd)) == "worktrees":
+                return os.path.dirname(os.path.dirname(os.path.dirname(gd)))
+    return repo
+
+
+HOME = main_checkout(REPO)
+TOKEN_FILE = os.environ.get("GCAL_TOKEN", os.path.join(HOME, ".secrets", "gcal-token.json"))
+STATE_FILE = os.environ.get("GCAL_STATE", os.path.join(HOME, ".session", "gcal.json"))
 API = "https://www.googleapis.com/calendar/v3"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
@@ -171,10 +191,11 @@ def api(method, path, body=None, **params):
         # 捨てないと、締めで予定を消して /clear した直後のブリーフが、
         # 消したはずの予定を出してしまう。次のブリーフで取り直させる。
         if method != "GET":
-            try:
-                os.remove(os.path.join(REPO, ".session", "cache", "agenda.json"))
-            except OSError:
-                pass
+            for root in {REPO, HOME}:
+                try:
+                    os.remove(os.path.join(root, ".session", "cache", "agenda.json"))
+                except OSError:
+                    pass
         return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         body_txt = e.read().decode()
@@ -434,6 +455,18 @@ def as_rows(evs):
     return out
 
 
+def other_calendars(own_id):
+    """自分のレイヤ以外で読んでいいカレンダー。無視リストと祝日カレンダーは除く。"""
+    skip = ignored()
+    return [c for c in calendars()
+            if c["id"] != own_id and c.get("summary") not in skip and c["id"] not in skip
+            and "#holiday@" not in c["id"]]
+
+
+def declined(ev):
+    return any(p.get("self") and p.get("responseStatus") == "declined" for p in ev.get("attendees", []))
+
+
 def cmd_agenda(a):
     tz = tz_of(a.tz)
     start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -441,7 +474,14 @@ def cmd_agenda(a):
     cal_id = own_cal_id()
 
     if getattr(a, "json", False):
-        print(json.dumps(as_rows(events_between(cal_id, start, end)), ensure_ascii=False))
+        rows = as_rows(events_between(cal_id, start, end))
+        if a.all:
+            # ブリーフは本人が手で入れた予定も読む。AI のカレンダーだけ見て「予定なし」と
+            # 出すのは、読めない日より悪い（安心させてしまう。2026-10-19 に実際に起きた）。
+            for c in other_calendars(cal_id):
+                rows += as_rows([ev for ev in events_between(c["id"], start, end) if not declined(ev)])
+            rows.sort(key=lambda r: (r["date"], r["time"] or ""))
+        print(json.dumps(rows, ensure_ascii=False))
         return
 
     print(f"\n=== {NAME} レイヤ · {start.date()} 〜 {end.date()} ({a.days}日) ===")
@@ -452,11 +492,8 @@ def cmd_agenda(a):
         print("  (予定なし)")
 
     if a.all:
-        skip = ignored()
-        for c in calendars():
-            if c["id"] == cal_id or c.get("summary") in skip or c["id"] in skip:
-                continue
-            evs = events_between(c["id"], start, end)
+        for c in other_calendars(cal_id):
+            evs = [ev for ev in events_between(c["id"], start, end) if not declined(ev)]
             if not evs:
                 continue
             print(f"\n=== {c.get('summary', c['id'])} ===")
@@ -751,7 +788,7 @@ def main():
     s.add_argument("--days", type=int, default=14)
     s.add_argument("--all", action="store_true", help="他のカレンダーも含める")
     s.add_argument("--json", action="store_true",
-                   help="機械可読の行（専用レイヤのみ）。bin/menu が使う")
+                   help="機械可読の行。--all と併せて全カレンダー（bin/menu が使う）")
     s.set_defaults(fn=cmd_agenda)
 
     s = sub.add_parser("find", help="全カレンダーを文字列検索して --id を得る")

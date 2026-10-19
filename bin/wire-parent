@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""親フォルダから Claude Code を開く人のための配線。ユーザーが1回打つ。
+
+    python3 bin/wire-parent              親フォルダ（このリポジトリの1つ上）を配線する
+    python3 bin/wire-parent --parent DIR 別のフォルダを配線する
+    python3 bin/wire-parent --dry-run    何をするかだけ出す
+    python3 bin/wire-parent --check      配線が足りているかだけ見る（bin/lint が使う）
+
+なぜ必要か: Claude Code が読むのは、**開いたフォルダ**の `.claude/` と `CLAUDE.md`
+だけ。たとえば `Desktop/claude` で開き、システムがその中の `ai/` にあると、
+スキルは全部「Unknown skill」、フックも許可もステータスラインも効かず、憲法も
+読まれない。**しかもエラーは出ない。** 2026-10-19、ある利用者の環境で12個のスキルが黙って
+使えなくなっていたのが見つかった。
+
+やること（何度打っても同じ結果）:
+  1. 親の `.claude/skills` と `.claude/agents` を、このリポジトリへの近道にする
+     （中身を写すと、元を直しても写しが古いまま動き続ける）
+  2. このリポジトリのフックを親の settings.json に配線する。どれも
+     CLAUDE_PROJECT_DIR をこのリポジトリに向けて動く
+  3. ステータスラインを、このリポジトリの本物に直接向ける
+  4. このリポジトリの許可を親にも足す（`Bash(bin/menu:*)` は `Bash(<名前>/bin/menu:*)` も）
+  5. 親の CLAUDE.md に、このリポジトリの CLAUDE.md を読み込む1行を足す
+
+親の設定は AI からは書けない（安全装置）ので、ユーザーが `!` で1回打つ。
+並べた近道や設定のうち、別のものが既にある場所は触らずに知らせる。
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+
+
+def main_checkout() -> Path:
+    """worktree から打っても、配線するのは本体のチェックアウト。"""
+    try:
+        common = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+        if common:
+            return Path(common).parent
+    except OSError:
+        pass
+    return HERE
+
+
+REPO = main_checkout()
+NAME = REPO.name
+ENV = f'CLAUDE_PROJECT_DIR="{REPO}"'
+
+
+def wired(cmd: str) -> str:
+    """このリポジトリ用のコマンドを、親から開いても動く形にする。"""
+    cmd = cmd.replace('"${CLAUDE_PROJECT_DIR:-$PWD}', f'"{REPO}').replace('"$CLAUDE_PROJECT_DIR', f'"{REPO}')
+    return f"{ENV} {cmd}"
+
+
+def ours(cmd: str) -> bool:
+    return cmd.startswith(ENV)
+
+
+def plan(parent: Path) -> tuple[list[str], dict, list[tuple[Path, Path]], str | None]:
+    """足りないものの一覧と、書くべき親の settings、張るべき近道、CLAUDE.md に足す行。"""
+    mine = json.loads((REPO / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    sp = parent / ".claude" / "settings.json"
+    theirs = json.loads(sp.read_text(encoding="utf-8")) if sp.is_file() else {}
+    want = json.loads(json.dumps(theirs))
+    gaps: list[str] = []
+
+    # フック: 以前この道具が足した分を外してから、今の分を足し直す
+    hooks = want.setdefault("hooks", {})
+    for event, groups in mine.get("hooks", {}).items():
+        kept = []
+        for g in hooks.get(event, []):
+            g = dict(g, hooks=[h for h in g.get("hooks", []) if not ours(h.get("command", ""))])
+            if g["hooks"]:
+                kept.append(g)
+        for g in groups:
+            kept.append(dict(g, hooks=[dict(h, command=wired(h["command"])) for h in g.get("hooks", [])]))
+        hooks[event] = kept
+    if hooks != theirs.get("hooks", {}):
+        gaps.append("フックが親に配線されていない（または古い）")
+
+    if "statusLine" in mine:
+        line = dict(mine["statusLine"], command=wired(mine["statusLine"]["command"]))
+        if theirs.get("statusLine") != line:
+            old = theirs.get("statusLine", {}).get("command")
+            gaps.append(f"ステータスラインが本物を指していない（今: {old or 'なし'}）")
+        want["statusLine"] = line
+
+    allow = want.setdefault("permissions", {}).setdefault("allow", [])
+    for a in mine.get("permissions", {}).get("allow", []):
+        for v in {a, re.sub(r"^Bash\(bin/", f"Bash({NAME}/bin/", a)}:
+            if v not in allow:
+                allow.append(v)
+    if allow != theirs.get("permissions", {}).get("allow", []):
+        gaps.append("このリポジトリの許可が親に無い")
+
+    links = []
+    for kind in ("skills", "agents"):
+        link, target = parent / ".claude" / kind, REPO / ".claude" / kind
+        if not target.exists():
+            continue
+        if link.is_symlink() and link.resolve() == target.resolve():
+            continue
+        if link.exists() or link.is_symlink():
+            gaps.append(f"親の .claude/{kind} が別のものとして既にある。中身を確かめて消してから打ち直す")
+            continue
+        gaps.append(f"親の .claude/{kind} がこのリポジトリを指していない")
+        links.append((link, target))
+
+    rel = os.path.relpath(REPO / "CLAUDE.md", parent)
+    cm = parent / "CLAUDE.md"
+    add = None
+    if f"@{rel}" not in (cm.read_text(encoding="utf-8") if cm.is_file() else ""):
+        gaps.append(f"親の CLAUDE.md が {rel} を読み込んでいない（憲法が読まれない）")
+        add = (f"\n# AI の運用システムは {os.path.relpath(REPO, parent)}/ にある。"
+               f"bin/ のコマンドはそこで打つ（bin/wire-parent が足した行）\n@{rel}\n")
+    return gaps, want, links, add
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--parent", type=Path, default=REPO.parent)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    a = ap.parse_args()
+    parent = a.parent.resolve()
+    if parent == REPO:
+        print("✖ 親フォルダとリポジトリが同じです。ここで開いているなら配線は要りません。")
+        return 2
+
+    gaps, want, links, add = plan(parent)
+    if a.check or a.dry_run:
+        for g in gaps:
+            print(f"- {g}")
+        if not gaps:
+            print(f"✔ {parent} から開いても、スキル・フック・許可・ステータスライン・憲法が効きます")
+        return 1 if gaps and a.check else 0
+
+    sp = parent / ".claude" / "settings.json"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(json.dumps(want, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    for link, target in links:
+        link.symlink_to(os.path.relpath(target, link.parent))
+    if add:
+        with open(parent / "CLAUDE.md", "a", encoding="utf-8") as f:
+            f.write(add)
+    left = plan(parent)[0]
+    for g in left:
+        print(f"⚠ {g}")
+    print(f"✔ {parent} を配線しました。Claude Code を開き直すと効きます" if not left
+          else "残りは上の通り。直してから打ち直してください")
+    return 0 if not left else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

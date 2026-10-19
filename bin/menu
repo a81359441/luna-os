@@ -487,7 +487,7 @@ def cal_rows(days: int = 8, refresh: bool = False) -> list[dict]:
     try:
         raw = subprocess.run(
             [sys.executable, str(ROOT / "bin" / "gcal" / "gcal.py"),
-             "agenda", "--days", str(days), "--json"],
+             "agenda", "--days", str(days), "--json", "--all"],
             capture_output=True, text=True, timeout=CAL_TIMEOUT,
         ).stdout.strip()
         rows = json.loads(raw)
@@ -1245,7 +1245,7 @@ def main() -> None:
 
     print()
     print(c(f"{ICON} {NAME}", GOLD + BOLD) + c(
-        f"  \u00b7  {now:%a %Y-%m-%d %H:%M}  \u00b7  {branch} ({state})", DIM))
+        f"  \u00b7  {now:%Y-%m-%d}({WEEKDAYS[now.weekday()]}) {now:%H:%M}  \u00b7  {branch} ({state})", DIM))
     print()
 
     if show_backlog:

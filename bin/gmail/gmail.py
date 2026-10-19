@@ -33,7 +33,27 @@ import urllib.parse
 import urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TOKEN_FILE = os.environ.get("GMAIL_TOKEN", os.path.join(REPO, ".secrets", "gmail-token.json"))
+
+def main_checkout(repo):
+    """worktree の中でも、鍵と状態は本体のチェックアウトにある。
+
+    `.secrets/` と `.session/` は gitignore 済みなので、新しい worktree には来ない。
+    worktree の `.git` はファイルで、`gitdir: <本体>/.git/worktrees/<名前>` を指す。
+    そこから本体を割り出す（2026-10-19、worktree でブリーフがカレンダーに届かなかった）。
+    """
+    g = os.path.join(repo, ".git")
+    if os.path.isfile(g):
+        with open(g, encoding="utf-8") as f:
+            line = f.read().strip()
+        if line.startswith("gitdir:"):
+            gd = os.path.normpath(os.path.join(repo, line[len("gitdir:"):].strip()))
+            if os.path.basename(os.path.dirname(gd)) == "worktrees":
+                return os.path.dirname(os.path.dirname(os.path.dirname(gd)))
+    return repo
+
+
+HOME = main_checkout(REPO)
+TOKEN_FILE = os.environ.get("GMAIL_TOKEN", os.path.join(HOME, ".secrets", "gmail-token.json"))
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 

@@ -703,6 +703,31 @@ def check_skill_usage(r: Report, today: date) -> None:
         r.ok(f"すべてのスキルが {window}日の間に1回以上呼ばれています")
 
 
+def check_parent_wiring(r: Report) -> None:
+    """親フォルダから開いたとき、このリポジトリの部品が効いているか。
+
+    Claude Code は開いたフォルダの `.claude/` しか読まない。親から開くと、スキルは
+    「Unknown skill」、フックも許可も憲法も黙って効かない（2026-10-19、ある利用者の環境で12個）。
+    親で開いた形跡（その会話履歴のフォルダ、または親の設定がこのリポジトリを指す）が
+    あるときだけ見る。中身の判定は bin/wire-parent --check に任せる。
+    """
+    home = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir") or ROOT / ".git").parent
+    parent = home.parent
+    opened = (Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(parent))).is_dir()
+    sp = parent / ".claude" / "settings.json"
+    pointed = sp.is_file() and str(home) in sp.read_text(encoding="utf-8", errors="ignore")
+    if not (opened or pointed):
+        return
+    r.section("親フォルダから開いたときの見え方")
+    res = subprocess.run([sys.executable, str(ROOT / "bin" / "wire-parent"), "--check"],
+                         capture_output=True, text=True)
+    if res.returncode == 0:
+        r.ok(f"{parent.name}/ から開いても部品はすべて効きます")
+        return
+    for line in res.stdout.splitlines():
+        r.fail(f"{line.lstrip('- ')}（直すには、ユーザーが `! python3 bin/wire-parent` を1回）")
+
+
 def check_git_hygiene(r: Report) -> None:
     r.section("Git の衛生")
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
@@ -774,6 +799,7 @@ def main() -> int:
         check_index_weight(r)
         check_skill_usage(r, today)
         check_memory(r)
+        check_parent_wiring(r)
         check_git_hygiene(r)
 
     print()

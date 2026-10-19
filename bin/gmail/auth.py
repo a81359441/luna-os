@@ -39,7 +39,27 @@ import urllib.request
 import webbrowser
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SECRETS = os.path.join(REPO, ".secrets")
+
+def main_checkout(repo):
+    """worktree の中でも、鍵と状態は本体のチェックアウトにある。
+
+    `.secrets/` と `.session/` は gitignore 済みなので、新しい worktree には来ない。
+    worktree の `.git` はファイルで、`gitdir: <本体>/.git/worktrees/<名前>` を指す。
+    そこから本体を割り出す（2026-10-19、worktree でブリーフがカレンダーに届かなかった）。
+    """
+    g = os.path.join(repo, ".git")
+    if os.path.isfile(g):
+        with open(g, encoding="utf-8") as f:
+            line = f.read().strip()
+        if line.startswith("gitdir:"):
+            gd = os.path.normpath(os.path.join(repo, line[len("gitdir:"):].strip()))
+            if os.path.basename(os.path.dirname(gd)) == "worktrees":
+                return os.path.dirname(os.path.dirname(os.path.dirname(gd)))
+    return repo
+
+
+HOME = main_checkout(REPO)
+SECRETS = os.path.join(HOME, ".secrets")
 CLIENT_FILE = os.environ.get("GMAIL_CLIENT", os.path.join(SECRETS, "gmail-client.json"))
 TOKEN_FILE = os.environ.get("GMAIL_TOKEN", os.path.join(SECRETS, "gmail-token.json"))
 
