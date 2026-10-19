@@ -3,7 +3,7 @@
 
 SessionStart フックが描画する（決定的な処理。モデルのトークンは1つも使わない）。
 既定の表示は**ブリーフであって、目次ではない**: 今日（カレンダーと今日が期限の
-backlog）、今週の見通し、忘れずに（state.md の `## Now` と計算した声かけ）、最近の成果物。
+backlog）、今週見ておくこと、予定、最近の成果物。
 ドメインの一覧は `--domains` の裏に置いてある。開いた瞬間に「行き先が20個」
 並ぶメニューは、そのセッションが開かれた理由そのものを見失わせるから。
 
@@ -15,7 +15,7 @@ backlog）、今週の見通し、忘れずに（state.md の `## Now` と計算
 いつも同じドメインを指す。
 
 使い方:
-  bin/menu            ブリーフ（今日・今週・忘れずに・最近の成果物）
+  bin/menu            ブリーフ（今日の3つ・今週見ておくこと・予定・最近の成果物）
   bin/menu --domains  最近動いたドメイン5件
   bin/menu --backlog  開いている項目すべて。締切順（ブリーフの `b`）
   bin/menu --all      全体地図。レーンごと
@@ -440,6 +440,9 @@ CAL_TTL = 3 * 3600      # 秒。セッションの開始が通信を待つこと
 CAL_TIMEOUT = 12        # 秒。これを超えたらカレンダー無しでブリーフを描く
 CAL_STATE = "ok"        # gcal もキャッシュも答えなかったときは "unavailable"
 OVERDUE_FOLD = 30       # 日。これより古い期限切れは1行に畳む
+URGENT_DAYS = 3         # 今日の3つ: ★ の項目は、期限がこの日数以内なら枠を争う
+STAR = "★"              # 大事の印。項目の見出し行に、本人か締めが付ける
+CLOCK = re.compile(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])")
 
 # 持ち出し除外マーカー。既定は parity で、backlog に書いたものは
 # `--json` を読む surface（スマホへの通知など）にもそのまま出る。
@@ -464,44 +467,6 @@ ITEM = re.compile(r"^(\s*)-\s*\[([ ~x])\]\s*(.*)$")
 ISO = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 MD = re.compile(r"(?<![\d/-])(\d{1,2})/(\d{1,2})(?![\d/])")
 BOLD_MD = re.compile(r"\*\*(.+?)\*\*")
-
-
-def now_block() -> list[str]:
-    """state.md の `## Now` ブロック。次の一手。締めのたびに**書き直される**。
-
-    ブリーフの中で、スクリプトが導出できない唯一の行。ほかは全部カレンダーと
-    backlog から計算できるが、ここだけは判断なので、`closeout` が書き、
-    メニューは描くだけ。これが無いとブリーフは「何が期限か」は言えても
-    「まず何をするか」は言えない。
-    """
-    try:
-        text = (ROOT / "state.md").read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
-    out, inside, comment = [], False, False
-    for line in text.splitlines():
-        if line.startswith("#"):
-            if inside:
-                break
-            inside = line.lstrip("# ").strip().lower().startswith("now")
-            continue
-        if not inside or not line.strip():
-            continue
-        # このブロックには、保守の仕方を書いた HTML コメントが入っている。
-        # あれはファイルを編集する人への指示であって、ブリーフに出すものではない。
-        if "<!--" in line:
-            comment = "-->" not in line
-            continue
-        if comment:
-            comment = "-->" not in line
-            continue
-        text_ = re.sub(r"[*`]", "", re.sub(r"^[-*]\s+", "", line.strip()))
-        # 雛形の「（まだありません…）」は編集する人への案内。初回のブリーフに
-        # そのまま出ると、相手には意味の分からない一行になる。
-        if text_.startswith("（まだありません"):
-            continue
-        out.append(text_)
-    return out[:3]
 
 
 def cal_rows(days: int = 8, refresh: bool = False) -> list[dict]:
@@ -576,7 +541,7 @@ def title_of(text: str) -> str:
     m = BOLD_MD.search(text)
     t = m.group(1) if (m and m.start() <= 3) else text.split("⏰")[0]
     t = re.sub(r"\s*⏰.*$", "", t)
-    t = re.sub(r"[*_`]", "", t)
+    t = re.sub(r"[*_`]", "", t).replace(STAR, "")
     return t.strip(" 　:：。.、,")
 
 
@@ -608,6 +573,10 @@ def backlog_items(path: Path, domain: str) -> list[dict]:
         # 🔒 が項目のどこかにあれば、この端末から出さない印。PRIVATE 参照。
         cur["private"] = any(PRIVATE in line for line in body)
         cur["decision"] = any(DECISION in line for line in body)
+        # ★ は見出し行のものだけ数える。下の補足は別のものを引用していることがある。
+        cur["star"] = STAR in body[0]
+        t = CLOCK.search(cur["title"])
+        cur["clock"] = f"{int(t.group(1)):02d}:{t.group(2)}" if t else None
         m = next((ADDED.search(line) for line in body if ADDED.search(line)), None)
         cur["added"] = dt.date.fromisoformat(m.group(1)) if m else None
         # closeout の「続ける」出口が残した次の一手。これがある [~] だけが resume の対象。
@@ -778,7 +747,7 @@ HEALTH_CACHE = CACHE / "health.json"
 
 
 def health_nudge(today: dt.date, refresh: bool = False) -> str | None:
-    """システムの健康状態を「忘れずに」の1行として返す。元は `bin/lint --health`。
+    """システムの健康状態をブリーフの最後の1行として返す。元は `bin/lint --health`。
 
     計算は1日1回。セッションの開始が会話記録の走査（2秒ほど）を待ってはいけないため。
     優先度はいちばん低い: 締めと日誌の声かけが埋めなかった枠にだけ入り、
@@ -880,7 +849,7 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
     **その surface に自分のソースを与えない**こと。二重に計算されたブリーフは
     二つのブリーフであり、保守されない方が必ず腐る。ここが唯一の継ぎ目。
 
-    形は 今日 → 今週 → 忘れずに → 最近の成果物。以前は3行の段落と締切の表と
+    形は 今日の3つ → 今週見ておくこと → 予定 → 最近の成果物（2026-10-19 から）。以前は3行の段落と締切の表と
     進行中の一覧を1画面に詰めていて、肝心の「今日」が見つからなかった。だから
     今日を先頭に、1つのことに1行、各ブロックに上限、残りは `b` の裏に畳む。
 
@@ -898,8 +867,11 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
         return {"time": r["time"], "title": FOCUS_PREFIX.sub("", title), "kind": "event",
                 "focus": r["purpose"] == "focus", "private": PRIVATE in title}
 
-    def it(i: dict) -> dict:
-        return {"time": None, "title": i["title"], "focus": False, "kind": "task",
+    def it(i: dict, on: dt.date | None = None) -> dict:
+        # 見出しに書いた時刻（「10/19（月）14:00〜14:30」）は、予定に入れていなくても時刻。
+        # 入れ忘れた 14:00 の面談が「·」で出ていたことがある。
+        t = i.get("clock") if on is not None and i["due"] == on else None
+        return {"time": t, "title": i["title"], "focus": False, "kind": "task",
                 "label": "" if i["domain"] == "横断" else names.get(i["domain"], i["domain"]),
                 "private": i.get("private", False)}
 
@@ -917,15 +889,21 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
         timed = sorted((r for r in cal_d if r["time"]), key=lambda r: hhmm(r["time"]))
         if after is not None:
             timed = [r for r in timed if hhmm(r["time"]) >= after]
-        out = [ev(r) for r in timed] + [ev(r) for r in cal_d if not r["time"]]
+        tasks = []
         for i in items:
             if i["due"] != d or any(same_thing(i["title"], r["title"]) for r in cal_d):
                 continue
             if per_dom.get(i["domain"], 0) >= 2:
                 continue
+            row = it(i, d)
+            if row["time"] and after is not None and hhmm(row["time"]) < after:
+                continue
             per_dom[i["domain"]] = per_dom.get(i["domain"], 0) + 1
-            out.append(it(i))
-        return out
+            tasks.append(row)
+        clocked = sorted([ev(r) for r in timed] + [t for t in tasks if t["time"]],
+                         key=lambda r: hhmm(r["time"]))
+        return (clocked + [ev(r) for r in cal_d if not r["time"]]
+                + [t for t in tasks if not t["time"]])
 
     # --- 先頭の日。ふつうは今日。ただし1時間以上前に始まった予定はもう過去で、
     # 何も残っていない夜のセッションは、終わった1日を繰り返さず明日から始める。
@@ -953,25 +931,77 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
         if (d - today).days > 6:
             break
         rs = day_rows(d)
-        keep = rs[:min(3, 6 - shown)]
+        keep = rs
         spill += len(rs) - len(keep)
         if keep:
             week.append({"date": d.isoformat(), "rows": keep})
             shown += len(keep)
     m["week"] = {"days": week, "spill": spill, "open": len(items)}
 
-    # --- 忘れずに: カレンダーには出ないもの。
-    # 締めが `## Now` に書く最大3行（予定に入らない大事なこと: 返信、練習、
-    # 振り返る価値のある出来事）と、ファイルから計算した声かけ。
-    # 入っている予定の言い直しにはしない。
+    # --- 今日の3つ。朝のブリーフが答えるのは「今日なにをするか」で、順位つき、
+    # 3つまで。線より下は 予定 か `b` に回す。以前の「忘れずに」は `## Now` の
+    # 自由記述で、終わったことが次の締めまで残り続けた。選び方はルールであって
+    # モデルではないので、どの surface にも同じ3つが出る:
+    #   今日の一点 → 時刻つきの予定2つまで → ★ で期限3日以内か期限切れ
+    #   → ★ で期限なし → 今日が期限 → 期限切れ。
+    # backlog の見出しの ★ が、ルールにはできない判断を受け持つ。
+    soon = lead + dt.timedelta(days=URGENT_DAYS)
+
+    def word(d):
+        if not d:
+            return "·"
+        return f"{d.month}/{d.day}" if (d - today).days > 2 else due_word(d, today)
+
+    def task(i: dict) -> dict:
+        return dict(it(i), time=word(i["due"]))
+
+    starred = [i for i in items if i.get("star")]
+    timed_ev = [r for r in ahead if r["kind"] == "event" and r["time"]]
+    pool = ([r for r in ahead if r.get("focus")]
+            + [r for r in timed_ev if not r.get("focus")][:2]
+            + [task(i) for i in sorted((i for i in starred if i["due"] and i["due"] <= soon),
+                                       key=lambda i: i["due"])]
+            + [task(i) for i in starred if not i["due"]]
+            + [r for r in ahead if r["kind"] == "task"]
+            + [task(i) for i in live_late])
+    three, seen = [], set()
+    for r in pool:
+        if r["title"] in seen:
+            continue
+        seen.add(r["title"])
+        three.append(r)
+        if len(three) == 3:
+            break
+    m["three"] = three
+
+    # 今週見ておくこと: 3つの外で、次に期限が来る ★ の項目。気づく前に急ぎに
+    # なるもの。★ が無ければ、7日以内でいちばん近い締切。
+    later = sorted((i for i in starred if i["due"] and i["due"] > soon and i["title"] not in seen),
+                   key=lambda i: i["due"])
+    if not later:
+        later = sorted((i for i in items if i["due"] and today < i["due"] <= today + dt.timedelta(days=7)
+                        and i["title"] not in seen), key=lambda i: i["due"])
+    m["watch"] = [task(i) for i in later[:1]]
+
+    # 予定: 今日の残りと、この先の日。1つのことに1行。
+    plan = []
+    rest = [r for r in ahead if r["title"] not in seen]
+    if rest:
+        plan.append({"date": lead.isoformat(), "rows": rest})
+    for d in week:
+        rs = [r for r in d["rows"] if r["title"] not in seen]
+        if rs:
+            plan.append({"date": d["date"], "rows": rs})
+    m["plan"] = plan[:5]
+
+    # ファイルから計算した声かけ（システムの調子など）は最後に1行で。
+    # やることではなく、仕組みについての知らせなので順位には入れない。
     nudges = computed_nudges(today)
-    hand = now_block()[:3 - len(nudges)]
-    if len(hand) + len(nudges) < 3:
+    if len(nudges) < 2:
         health = health_nudge(today, refresh)
         if health:
             nudges.append(health)
-    m["dontmiss"] = ([{"text": t, "source": "closeout", "private": PRIVATE in t} for t in hand]
-                     + [{"text": t, "source": "computed", "private": False} for t in nudges])
+    m["dontmiss"] = [{"text": t, "source": "computed", "private": False} for t in nudges]
     m["recent"] = recent_work()
     return m
 
@@ -1037,7 +1067,7 @@ def render_first_run(c) -> None:
 def render_brief(c, names, model: dict) -> None:
     """既定の表示。**どこに何があるか**ではなく、**何をするか**。
 
-    今日 → 今週 → 忘れずに、1つのことに1行（最近の成果物は main が最後に出す）。
+    今日の3つ → 今週見ておくこと → 予定、1つのことに1行（最近の成果物は main が最後に出す）。
     ドメイン一覧は置かない（`d` のキー1つ先）。一目で読めないブリーフは読まれない。
 
     内容は決めない。`brief_model()` が決めたものを端末向けに描くだけ。
@@ -1058,43 +1088,42 @@ def render_brief(c, names, model: dict) -> None:
     print(f"  {greeting(dt.datetime.now().hour)}")
     print()
 
-    lead = model["lead"]
-    head("今日" if lead["is_today"] else "明日")
     if model.get("calendar") == "unavailable":
         print(f"    {c('⚠ ここからはカレンダーに届きません。backlog だけを出しています。', GOLD)}")
-    if lead["rows"]:
-        for r in lead["rows"]:
-            line(r)
-        if lead["spill"]:
-            more = f"ほか {lead['spill']}件"
-            print(f"    {c(more, DIM)}")
-    elif model.get("calendar") != "unavailable":
-        print(f"    {c('予定なし', DIM)}")
-    for o in model["overdue"]:
-        age = f"{o['days']}日超過"
-        print(f"    {c('⚠ 期限切れ', GOLD)}  {trunc(o['title'], 44)}  {c(age, DIM)}")
-    print()
-
-    w = model["week"]
-    if w["days"]:
-        head("今週")
-        for day in w["days"]:
-            d = dt.date.fromisoformat(day["date"])
-            for n, r in enumerate(day["rows"]):
-                label = day_label(d) if n == 0 else ""
-                tail = c(f"  {r['label']}", DIM) if r.get("label") else ""
-                print(f"    {c(pad(label, 10), DIM)}{c(pad(when(r), 9), DIM)}"
-                      f"{trunc(r['title'], 42)}{tail}")
-        if w["spill"]:
-            more = f"ほか {w['spill']}件  → b"
-            print(f"    {c(more, DIM)}")
         print()
 
+    head("今日の3つ" if model["lead"]["is_today"] else "明日の3つ")
+    if model["three"]:
+        for n, r in enumerate(model["three"], 1):
+            mark = c("◆ ", GOLD) if r.get("focus") else ""
+            tail = c(f"  {r['label']}", DIM) if r.get("label") else ""
+            print(f"    {c(str(n), GOLD)}  {c(pad(when(r), 7), DIM)}{mark}{trunc(r['title'], 46)}{tail}")
+    else:
+        print(f"    {c('差し迫ったものはありません', DIM)}")
+    print()
+
+    if model["watch"]:
+        head("今週見ておくこと")
+        for r in model["watch"]:
+            tail = c(f"  {r['label']}", DIM) if r.get("label") else ""
+            print(f"    {c(pad(r['time'], 10), DIM)}{trunc(r['title'], 46)}{tail}")
+        print()
+
+    if model["plan"]:
+        head("予定")
+        for day in model["plan"]:
+            d = dt.date.fromisoformat(day["date"])
+            name = "今日" if d == dt.date.today() else day_label(d)
+            for n, r in enumerate(day["rows"][:3]):
+                tail = c(f"  {r['label']}", DIM) if r.get("label") else ""
+                print(f"    {c(pad(name if n == 0 else '', 10), DIM)}{c(pad(when(r), 7), DIM)}"
+                      f"{trunc(r['title'], 40)}{tail}")
+        print()
+
+    for f in model["dontmiss"]:
+        for n, ln in enumerate(wrap(f["text"], 64)):
+            print(f"    {'›' if n == 0 else ' '} {ln}")
     if model["dontmiss"]:
-        head("忘れずに")
-        for f in model["dontmiss"]:
-            for n, ln in enumerate(wrap(f["text"], 64)):
-                print(f"    {'›' if n == 0 else ' '} {ln}")
         print()
 
     if model.get("starter"):
