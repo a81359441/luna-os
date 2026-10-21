@@ -16,6 +16,7 @@
 #   start              挨拶 + スタートメニュー、そのあと入力待ち
 #   start -c           引数やフラグはそのまま素通し（挨拶なし）
 #   NO_GREET=1 start   素のセッション。開始プロンプトを渡さない
+#   start --panel      横の欄（panel/ の mod）つきで開く。メニューは画面に出るので挨拶なし
 set -u
 # シンボリックリンク経由で呼ばれても、リンク先の本物の場所からリポジトリを割り出す。
 SELF="${BASH_SOURCE[0]}"
@@ -34,6 +35,16 @@ cd "$AI_HOME" || exit 1
 OPEN="セッション開始。一行で挨拶して、そのあと文脈にあるスタートメニューを\
 そのまま再現してください。まだ何も読み込まないこと: state.md もドメインの\
 ファイルもツール呼び出しも不要です。私の選択を待ってください。"
+
+# 横の欄は選んだ人だけ。既定の動きは変えない（使う人の環境を、更新で黙って変えないため）。
+if [ "${1:-}" = "--panel" ]; then
+  shift
+  if [ ! -d "$AI_HOME/panel" ]; then
+    echo "start: $AI_HOME/panel が見つかりません" >&2
+    exit 1
+  fi
+  exec claude --plugin-dir "$AI_HOME/panel" "$@"
+fi
 
 if [ "$#" -eq 0 ] && [ -z "${NO_GREET:-}" ]; then
   exec claude "${OPEN_PROMPT:-$OPEN}"

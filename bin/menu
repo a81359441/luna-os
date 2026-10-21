@@ -20,6 +20,7 @@ backlog）、今週見ておくこと、予定、最近の成果物。
   bin/menu --backlog  開いている項目すべて。締切順（ブリーフの `b`）
   bin/menu --all      全体地図。レーンごと
   bin/menu --json     ブリーフをデータとして出す（端末以外の surface 用）
+  bin/menu --json --domains  ドメイン一覧と開いている項目をデータで（横の欄 panel/ 用）
   bin/menu --refresh  キャッシュを使わずカレンダーを取り直す
   bin/menu --top N    最近の N 件
   bin/menu --no-sync  main の早送り（bin/sync-main）を飛ばす
@@ -27,6 +28,7 @@ backlog）、今週見ておくこと、予定、最近の成果物。
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -272,8 +274,8 @@ def measure(domain: Path, exclude: list[Path]) -> tuple[int, int, tuple]:
     return file_tokens(idx), total, heaviest
 
 
-def row_for(domain: Path, parent: str | None = None) -> dict:
-    kids = child_domains(domain)
+def last_work(domain: Path, kids: list[Path]) -> tuple[dt.date | None, str]:
+    """ドメインで最後に起きたこと: (日付, 説明)。"""
     log = last_entry(domain, exclude=kids)
     gday, gsubject = git_history().get(domain.name, (None, ""))
     # 横断コミット（改名や方針の適用）はこのドメインの仕事ではないので、
@@ -294,6 +296,12 @@ def row_for(domain: Path, parent: str | None = None) -> dict:
         note = gsubject
     if not note:
         note = "（触っただけ。締めなし）" if day else "（ログなし）"
+    return day, note
+
+
+def row_for(domain: Path, parent: str | None = None) -> dict:
+    kids = child_domains(domain)
+    day, note = last_work(domain, kids)
     idx_t, total, heaviest = measure(domain, kids)
     return {
         "slug": domain.name,
@@ -588,8 +596,12 @@ def backlog_items(path: Path, domain: str) -> list[dict]:
                 break
         items.append(cur)
 
+    try:
+        rel = str(path.relative_to(ROOT))
+    except ValueError:
+        rel = str(path)
     cur, skip = None, False
-    for line in lines + ["## "]:
+    for n, line in enumerate(lines + ["## "], 1):
         if line.startswith("## "):
             close(cur)
             cur = None
@@ -600,7 +612,7 @@ def backlog_items(path: Path, domain: str) -> list[dict]:
             close(cur)
             cur = None if skip else {
                 "state": m.group(2), "title": title_of(m.group(3)), "domain": domain,
-                "body": [m.group(3)], "due": None, "dated": False,
+                "body": [m.group(3)], "due": None, "dated": False, "file": rel, "line": n,
             }
             continue
         if cur is not None and line.strip():
@@ -842,6 +854,62 @@ def recent_work(n: int = RECENT_N) -> list[dict]:
     return sorted(items.values(), key=lambda r: r["at"], reverse=True)[:n]
 
 
+
+def item_src(i: dict) -> dict:
+    """項目の置き場所。横の欄（panel/）は題名ではなくこの id を送り、
+    ファイルから消えた id の送信は断る。"""
+    return {"file": i["file"], "line": i["line"],
+            "id": hashlib.sha1(f'{i["domain"]}\n{i["title"]}'.encode()).hexdigest()[:10]}
+
+
+def domains_model(names: dict) -> dict:
+    """ドメイン一覧をデータとして出す（横の欄 panel/ 用）。レーン順、メニューの
+    番号、最後にやったこと、開いている項目。"""
+    today = dt.date.today()
+    rows = []
+    for domain in sorted(DOMAINS.iterdir()) if DOMAINS.is_dir() else []:
+        if not is_domain_dir(domain):
+            continue
+        rows.append({"slug": domain.name, "parent": None})
+        rows += [{"slug": kid.name, "parent": domain.name} for kid in child_domains(domain)]
+    lanes = lane_order(rows)
+    nums = numbering(lanes)
+    by_dom: dict = {}
+    for i in all_items():
+        by_dom.setdefault(i["domain"], []).append(i)
+
+    def item(i: dict) -> dict:
+        return {"title": i["title"], "state": i["state"], "star": i["star"],
+                "decision": i["decision"],
+                "due": due_word(i["due"], today) if i["due"] else None,
+                "late": bool(i["due"] and i["due"] < today),
+                "private": i.get("private", False),
+                "src": item_src(i)}
+
+    def order(items: list[dict]) -> list[dict]:
+        # 期限つきを日付順に、次に ★、あとはファイルの順。
+        return sorted(items, key=lambda i: (i["due"] is None, i["due"] or today, not i["star"]))
+
+    def last(r: dict) -> dict:
+        # 最後にやったこと。名前だけでは、そこで何が待っているか分からないので。
+        path = DOMAINS / r["parent"] / r["slug"] if r["parent"] else DOMAINS / r["slug"]
+        day, note = last_work(path, child_domains(path))
+        # コミットの件名の「[名前] <slug>: … #タグ」は、欄がもう示しているので外す。
+        note = re.sub(rf"^\[[^\]]+\]\s*({re.escape(r['slug'])}:\s*)?|\s*#\S+", "", note)
+        return {"ago": ago(day), "day": day.isoformat() if day else None,
+                "note": clean(note), "private": False}
+
+    out = [{"n": nums[r["slug"]], "slug": r["slug"], "name": names.get(r["slug"], r["slug"]),
+            "parent": r["parent"], "lane": lane, "last": last(r),
+            "items": [item(i) for i in order(by_dom.get(r["slug"], []))]}
+           for lane, bucket in lanes for r in bucket]
+    cross = by_dom.get("横断", [])
+    if cross:
+        out.append({"n": None, "slug": "cross-domain", "name": "横断", "parent": None,
+                    "lane": "横断", "last": None, "items": [item(i) for i in order(cross)]})
+    return {"at": dt.datetime.now().strftime("%H:%M"), "domains": out}
+
+
 def brief_model(names: dict, refresh: bool = False) -> dict:
     """ブリーフを**データ**として返す。どの surface も同じ計算から描くため。
 
@@ -873,7 +941,8 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
         t = i.get("clock") if on is not None and i["due"] == on else None
         return {"time": t, "title": i["title"], "focus": False, "kind": "task",
                 "label": "" if i["domain"] == "横断" else names.get(i["domain"], i["domain"]),
-                "private": i.get("private", False)}
+                "private": i.get("private", False),
+                "src": item_src(i)}
 
     m: dict = {"date": today.isoformat(), "at": clock.strftime("%H:%M"), "calendar": CAL_STATE}
 
@@ -942,8 +1011,10 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
     # 3つまで。線より下は 予定 か `b` に回す。以前の「忘れずに」は `## Now` の
     # 自由記述で、終わったことが次の締めまで残り続けた。選び方はルールであって
     # モデルではないので、どの surface にも同じ3つが出る:
-    #   今日の一点 → 時刻つきの予定2つまで → ★ で期限3日以内か期限切れ
-    #   → ★ で期限なし → 今日が期限 → 期限切れ。
+    #   今日の一点 → ★ で期限3日以内か期限切れ → ★ で期限なし
+    #   → 今日が期限 → 期限切れ。
+    # カレンダーの予定は 予定 に置く。移動や食事が「今日の3つ」に並ぶと
+    # タスクに見え、本当のタスクを押し出すため。
     # backlog の見出しの ★ が、ルールにはできない判断を受け持つ。
     soon = lead + dt.timedelta(days=URGENT_DAYS)
 
@@ -956,9 +1027,7 @@ def brief_model(names: dict, refresh: bool = False) -> dict:
         return dict(it(i), time=word(i["due"]))
 
     starred = [i for i in items if i.get("star")]
-    timed_ev = [r for r in ahead if r["kind"] == "event" and r["time"]]
     pool = ([r for r in ahead if r.get("focus")]
-            + [r for r in timed_ev if not r.get("focus")][:2]
             + [task(i) for i in sorted((i for i in starred if i["due"] and i["due"] <= soon),
                                        key=lambda i: i["due"])]
             + [task(i) for i in starred if not i["due"]]
@@ -1232,6 +1301,9 @@ def main() -> None:
 
     # ブリーフをデータとして出す。端末以外の surface 用。
     # 読む側は stdout に JSON だけを期待するので、飾りより先に返す。
+    if as_json and show_domains:
+        print(json.dumps(domains_model(names), ensure_ascii=False))
+        return
     if as_json:
         model = brief_model(names, refresh=refresh)
         model["starter"] = starter_items()

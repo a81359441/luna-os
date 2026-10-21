@@ -1,0 +1,1 @@
+{ "name": "ai-panel", "version": "0.1.0", "description": "ブリーフとドメイン一覧を、セッションの横の欄と入力欄の上に出す", "types": "./types/index.d.ts" }
