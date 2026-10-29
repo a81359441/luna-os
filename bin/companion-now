@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""相棒（Muse などの秘書AI）とのつなぎ目に feed/now.md を書く。任意の部品。
+
+相棒が毎回まず開くのはこの1ファイル。中身は bin/menu --json から作るので
+ブリーフと同じで、AI を使わない（ログインが切れても止まらない）。
+手順と境界は docs/相棒とのつなぎ目.md。
+
+  bin/companion-now --init <フォルダ> --name <相棒の名前>   つなぎ目を新しく作る
+  bin/companion-now                    now.md を書き、変わっていれば commit と push
+  bin/companion-now --ask "..."        相棒への `ask:` の1行も置く（次に置くまで残る）
+  bin/companion-now --ask ""           `ask:` を消す
+  bin/companion-now --dry-run          表示だけ、何も書かない
+
+つなぎ目の場所は --seam か、環境変数 AI_COMPANION_SEAM。
+🔒 の行は件数だけ。先頭の時刻は中身を作った時刻なので、古ければ古いと分かる。
+"""
+import argparse, json, os, re, subprocess, sys
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKELETON = ROOT / "docs" / "相棒の雛形"
+WD = "月火水木金土日"
+PH = "{{" + "AI_NAME" + "}}"
+
+
+def ai_name() -> str:
+    """setup が bin/menu に入れた名前。まだなら「運用AI」。"""
+    m = re.search(r'^NAME = "(.*?)"', (ROOT / "bin" / "menu").read_text(), re.M)
+    name = m.group(1) if m else ""
+    return "運用AI" if not name or name == PH else name
+
+
+def git(seam, *a, check=True):
+    return subprocess.run(["git", "-C", str(seam), *a], capture_output=True,
+                          text=True, check=check, timeout=30)
+
+
+def init(seam: Path, companion: str):
+    if seam.exists() and any(seam.iterdir()):
+        sys.exit(f"{seam} は空ではありません。別のフォルダを指定してください。")
+    for d in ("feed/done", "inbox/done"):
+        (seam / d).mkdir(parents=True, exist_ok=True)
+        (seam / d / ".keep").touch()
+    subs = {PH: ai_name(), "{{COMPANION_NAME}}": companion,
+            "{{SEAM_NAME}}": seam.resolve().name}
+    for src in SKELETON.iterdir():
+        text = src.read_text()
+        for k, v in subs.items():
+            text = text.replace(k, v)
+        (seam / src.name).write_text(text)
+    git(seam, "init", "-q", "-b", "main")
+    git(seam, "add", ".")
+    git(seam, "commit", "-q", "-m", f"つなぎ目を開く（{companion} と {ai_name()}）")
+    print(f"作りました: {seam}")
+    print(f"次: gh repo create {seam.resolve().name} --private --source {seam} --remote origin --push")
+
+
+def old_ask(now: Path) -> str:
+    if now.exists():
+        m = re.search(r"^ask: (.*)$", now.read_text(), re.M)
+        if m and m.group(1).strip() != "なし":
+            return m.group(1).strip()
+    return ""
+
+
+def rows(items, limit):
+    out, hidden = [], 0
+    for r in items:
+        if r.get("private"):
+            hidden += 1
+            continue
+        if len(out) < limit:
+            out.append(f"- {r.get('time') or '·'} {r['title']}")
+    if hidden:
+        out.append(f"- 🔒 {hidden}件")
+    return out
+
+
+def render(d: dict, ask: str) -> str:
+    def label(s):
+        y, m, dd = map(int, s.split("-"))
+        return f"{m}/{dd}（{WD[date(y, m, dd).weekday()]}）"
+
+    lines = [f"# now（{ai_name()} がこの内容を作った時刻: {d['date']} {d['at']}）", ""]
+    lines.append(f"ask: {ask or 'なし'}")
+    lines += ["", "## 今日の3つ"] + (rows(d.get("three") or [], 3) or ["- なし"])
+    lines += ["", "## 予定"]
+    if d.get("calendar") != "ok":
+        lines.append("- カレンダーを読めなかった。予定がないとは限らない")
+    for day in (d.get("plan") or [])[:2]:
+        lines.append(f"**{label(day['date'])}**")
+        lines += rows(day.get("rows") or [], 4) or ["- なし"]
+    return "\n".join(lines) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seam", default=os.environ.get("AI_COMPANION_SEAM"))
+    ap.add_argument("--init", metavar="フォルダ")
+    ap.add_argument("--name", help="--init で使う相棒の名前")
+    ap.add_argument("--ask")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    if a.init:
+        if not a.name:
+            sys.exit("--init には --name <相棒の名前> も要ります。")
+        return init(Path(a.init), a.name)
+    if not a.seam:
+        sys.exit("つなぎ目の場所を --seam か AI_COMPANION_SEAM で指定してください。")
+    seam = Path(a.seam)
+    if not (seam / ".git").is_dir():
+        sys.exit(f"つなぎ目が見つかりません: {seam}")
+    now = seam / "feed" / "now.md"
+    raw = subprocess.run([str(ROOT / "bin" / "menu"), "--json"],
+                         capture_output=True, text=True, timeout=120).stdout
+    d = json.loads(raw)
+    ask = old_ask(now) if a.ask is None else a.ask.strip()
+    text = render(d, ask)
+    if a.dry_run:
+        print(text, end="")
+        return
+    git(seam, "pull", "-q", "--ff-only", check=False)
+    now.write_text(text)
+    git(seam, "add", "feed/now.md")
+    if git(seam, "diff", "--cached", "--quiet", check=False).returncode == 0:
+        print("now.md は変わっていません")
+        return
+    git(seam, "commit", "-q", "-m", f"now: {d['date']} {d['at']}")
+    p = git(seam, "push", "-q", check=False)
+    if p.returncode != 0:
+        sys.exit(f"commit はしたが push に失敗: {p.stderr.strip()[:120]}")
+    print("now.md を push しました")
+
+
+if __name__ == "__main__":
+    main()
