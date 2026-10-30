@@ -73,6 +73,7 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 NAME = "{{AI_NAME}}"   # setup スキルが置き換える
 CAL_NAME = NAME        # カレンダー一覧に出る名前。AIと同じ名前にしておく
+RHYTHM = "#rhythm"  # 予定の説明欄に書くと、約束ではなく生活のリズムの枠として扱う
 DEFAULT_TZ = os.environ.get("AI_TZ", "Asia/Tokyo")
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
@@ -451,6 +452,9 @@ def as_rows(evs):
             "tag": priv.get("aiTag", ""),
             "source": priv.get("aiSource", ""),
             "key": priv.get("aiKey", ""),
+            # 1日のリズム（起床、就寝、運動、仕事や私用の枠）。ブリーフは
+            # これを 予定 に並べず、1行に畳む。
+            "rhythm": RHYTHM in (ev.get("description") or ""),
         })
     return out
 

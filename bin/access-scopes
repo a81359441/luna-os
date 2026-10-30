@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""{{AI_NAME}}が持っている Google の鍵（トークン）それぞれに、何が許されているか。スコープの名前だけを出す。
+
+「外とつながる口」を本人が見て決められるようにするためのもの（決めるのは自分）。
+本当のことは、その鍵が実際に認可されたスコープであって、認可のときにコードが
+頼んだものではない。bin/gcal/auth.py や bin/gmail/auth.py はフラグでスコープを選ぶから。
+
+これは、鍵を使う道具以外で .secrets/*-token.json を読む唯一のもの。だから一目で
+確かめられる小ささに保つ：各ファイルを読み、`scope` の欄だけを出す。トークン、
+リフレッシュトークン、クライアントID、ほかの値は決して出さない。読めないファイルは
+名前だけを伝える。
+
+    bin/access-scopes    JSON: {"tokens": [{"name": "gcal", "scopes": [...]}]}
+"""
+import glob
+import json
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def main_checkout(repo):
+    """worktree の中でも、鍵は本体のチェックアウトにある（bin/gcal/gcal.py と同じ割り出し方）。"""
+    g = os.path.join(repo, ".git")
+    if os.path.isfile(g):
+        with open(g, encoding="utf-8") as f:
+            line = f.read().strip()
+        if line.startswith("gitdir:"):
+            gd = os.path.normpath(os.path.join(repo, line[len("gitdir:"):].strip()))
+            if os.path.basename(os.path.dirname(gd)) == "worktrees":
+                return os.path.dirname(os.path.dirname(os.path.dirname(gd)))
+    return repo
+
+
+SECRETS = os.path.join(main_checkout(REPO), ".secrets")
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+    out = []
+    for path in sorted(glob.glob(os.path.join(SECRETS, "*-token.json"))):
+        name = os.path.basename(path)[: -len("-token.json")]
+        try:
+            with open(path, encoding="utf-8") as f:
+                scope = json.load(f).get("scope")
+        except (OSError, ValueError):
+            out.append({"name": name, "scopes": None})
+            continue
+        scopes = scope.split() if isinstance(scope, str) else None
+        out.append({"name": name, "scopes": scopes})
+    json.dump({"tokens": out}, sys.stdout, ensure_ascii=False)
+    print()
+
+
+if __name__ == "__main__":
+    main()
